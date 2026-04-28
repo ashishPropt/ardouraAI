@@ -1,0 +1,35 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "python",
+      "args": ["mcp_github_server.py"],
+      "cwd": "C:\\Users\\amath\\OneDrive\\Documents\\sourcr\\ArdouraAI",
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "description": "GitHub tools: get_repo_tree, get_file, commit_file, load_codebase"
+    },
+    "jira": {
+      "command": "python",
+      "args": ["mcp_jira_server.py"],
+      "cwd": "C:\\Users\\amath\\OneDrive\\Documents\\sourcr\\ArdouraAI",
+      "env": {
+        "ATLASSIAN_BASE":      "${ATLASSIAN_BASE}",
+        "ATLASSIAN_EMAIL":     "${ATLASSIAN_EMAIL}",
+        "ATLASSIAN_API_TOKEN": "${ATLASSIAN_API_TOKEN}"
+      },
+      "description": "Jira tools: search_issues, create_ticket, get_issue"
+    },
+    "confluence": {
+      "command": "python",
+      "args": ["mcp_confluence_server.py"],
+      "cwd": "C:\\Users\\amath\\OneDrive\\Documents\\sourcr\\ArdouraAI",
+      "env": {
+        "ATLASSIAN_BASE":      "${ATLASSIAN_BASE}",
+        "ATLASSIAN_EMAIL":     "${ATLASSIAN_EMAIL}",
+        "ATLASSIAN_API_TOKEN": "${ATLASSIAN_API_TOKEN}"
+      },
+      "description": "Confluence tools: get_page, find_page_id, create_or_update"
+    }
+  }
+}
