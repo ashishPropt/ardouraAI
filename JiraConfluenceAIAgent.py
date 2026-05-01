@@ -2,11 +2,11 @@
 Jira-Confluence-Claude-GitHub AI Agent
 ========================================
 Workflow:
-  1. Fetch open Jira tickets
+  1. Fetch open Jira tickets from ADEV project
   2. Pull two Confluence documentation pages
   3. Use Claude as an AI brain to determine the recommended action per ticket
   4. If the action requires a code change → fetch the full GitHub repo, apply the change, commit
-  5. Create a new Jira ticket with the recommended (immediately actionable) action
+  5. Create a new Jira ticket in ACR project (approval flow) with the recommended action
 """
 
 import os
@@ -34,8 +34,11 @@ ATLASSIAN_BASE      = "https://proptxchange.atlassian.net"
 ATLASSIAN_EMAIL     = "ashish@proptxchange.com"
 ATLASSIAN_API_TOKEN = "ATATT3xFfGF0uJY9cuMSM6d0bU_8KMUm2BSnw2PPvOJ5WXGRBfpKCrgw480FXxkvDBHDvReHjIyCr66XeqdiUoIcqrsGbFvID7WvCMsZTxcn4M5xh5XlX-EdmCTnEPsDlgX1i-ccStCXxFB-_Do5DtPuNcRXvscs6RRpDki6O9mAUesZrMnHB4Q=8F34BC98"
 
-# Jira project key to use when creating action tickets
-JIRA_PROJECT_KEY    = "ADEV"
+# Jira project key to fetch source tickets from
+JIRA_SOURCE_PROJECT_KEY = "ADEV"
+
+# Jira project key for action/approval tickets (approval flow)
+JIRA_ACTION_PROJECT_KEY = "ACR"
 
 # Confluence page IDs (extracted from the URLs provided)
 CONFLUENCE_DOC_PAGE_ID          = "5996545"   # Princetondawgs Documentation
@@ -151,6 +154,41 @@ def _adf_to_text(node: dict, depth: int = 0) -> str:
     if ntype in ("paragraph", "heading", "listItem"):
         result += "\n"
     return result
+
+
+def ensure_acr_project_exists() -> bool:
+    """
+    Check if the ACR project exists in Jira. If not, create it.
+    Returns True if the project is available (exists or was just created).
+    """
+    try:
+        jira_get(f"/project/{JIRA_ACTION_PROJECT_KEY}")
+        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} exists.")
+        return True
+    except Exception:
+        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} not found — attempting to create …")
+
+    try:
+        # Fetch the current user's account ID for project lead
+        myself = jira_get("/myself")
+        account_id = myself.get("accountId", "")
+
+        payload = {
+            "key":            JIRA_ACTION_PROJECT_KEY,
+            "name":           "AI Change Requests (ACR)",
+            "projectTypeKey": "software",
+            "leadAccountId":  account_id,
+            "description":    (
+                "Auto-generated approval tickets from the AI Agent pipeline. "
+                "Each ticket represents a recommended action for review and approval."
+            ),
+        }
+        jira_post("/project", payload)
+        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} created successfully.")
+        return True
+    except Exception as e:
+        print(f"  [Jira] Could not create project {JIRA_ACTION_PROJECT_KEY}: {e}")
+        return False
 
 
 def create_jira_ticket(project_key: str, summary: str, description: str,
@@ -425,9 +463,11 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
     description_parts = [
         f"AUTO-GENERATED ACTION TICKET — linked to {issue['key']}\n",
         f"Original Jira: {issue['key']} – {issue['summary']}\n",
+        f"Source Project: {JIRA_SOURCE_PROJECT_KEY}  |  Approval Project: {JIRA_ACTION_PROJECT_KEY}\n",
         "─" * 50,
         "\nRECOMMENDED ACTION\n",
         analysis.get("action_detail", "See action_summary."),
+        "\n\n⚠️  This ticket requires review and approval before any action is taken.",
     ]
 
     if analysis.get("sql"):
@@ -447,21 +487,21 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
 
     full_description = "\n".join(description_parts)
 
-    # ── Create the action Jira ticket ─────────────────────────────────
+    # ── Create the action Jira ticket in ACR (approval flow) ──────────
     new_summary = (f"[ACTION] {analysis.get('action_summary', issue['summary'])}"
                    )[:250]  # Jira summary limit
 
-    print(f"  [Jira] Creating action ticket …")
+    print(f"  [Jira] Creating approval ticket in {JIRA_ACTION_PROJECT_KEY} …")
     try:
         new_ticket = create_jira_ticket(
-            project_key  = JIRA_PROJECT_KEY,
+            project_key  = JIRA_ACTION_PROJECT_KEY,   # ← ACR for approval flow
             summary      = new_summary,
             description  = full_description,
             issue_type   = "Task",
             priority     = issue.get("priority", "Medium") or "Medium",
-            labels       = ["ai-recommended", "auto-generated"],
+            labels       = ["ai-recommended", "auto-generated", "pending-approval"],
         )
-        print(f"  [Jira] Created: {new_ticket['key']}  →  {new_ticket.get('self','')}")
+        print(f"  [Jira] Created {JIRA_ACTION_PROJECT_KEY} ticket: {new_ticket['key']}  →  {new_ticket.get('self','')}")
     except Exception as e:
         print(f"  [Jira] ERROR creating ticket: {e}")
 
@@ -469,7 +509,12 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
 def main():
     print("\n" + "═" * 60)
     print("  Jira ↔ Confluence ↔ Claude ↔ GitHub Agent")
+    print(f"  Source: {JIRA_SOURCE_PROJECT_KEY}  →  Approval: {JIRA_ACTION_PROJECT_KEY}")
     print("═" * 60)
+
+    # 0. Ensure ACR project exists (create if absent)
+    print(f"\n[Step 0] Verifying {JIRA_ACTION_PROJECT_KEY} project exists …")
+    ensure_acr_project_exists()
 
     # 1. Fetch Confluence documentation
     print("\n[Step 1] Fetching Confluence documentation pages …")
@@ -478,14 +523,13 @@ def main():
     print(f"  Loaded doc page       : {len(doc_page):,} chars")
     print(f"  Loaded troubleshoot pg: {len(troubleshoot_page):,} chars")
 
-    # 2. Fetch open Jira tickets
-    print("\n[Step 2] Fetching open Jira tickets …")
+    # 2. Fetch open Jira tickets from ADEV (source project)
+    print(f"\n[Step 2] Fetching open Jira tickets from {JIRA_SOURCE_PROJECT_KEY} …")
     issues = []
-    if JIRA_PROJECT_KEY:
-        try:
-            issues = fetch_open_jiras(project_key=JIRA_PROJECT_KEY)
-        except Exception as e:
-            print(f"  Project key '{JIRA_PROJECT_KEY}' failed ({e}) — trying without filter")
+    try:
+        issues = fetch_open_jiras(project_key=JIRA_SOURCE_PROJECT_KEY)
+    except Exception as e:
+        print(f"  Project key '{JIRA_SOURCE_PROJECT_KEY}' failed ({e}) — trying without filter")
     if not issues:
         try:
             issues = fetch_open_jiras()
@@ -512,8 +556,8 @@ def main():
         print("  Nothing to process. Exiting.")
         return
 
-    # 3. Process each issue
-    print("\n[Step 3] Analysing each ticket with Claude …")
+    # 3. Process each issue → create ACR approval ticket
+    print(f"\n[Step 3] Analysing each ticket with Claude → creating {JIRA_ACTION_PROJECT_KEY} approval tickets …")
     for issue in issues:
         try:
             process_jira_issue(issue, doc_page, troubleshoot_page)
