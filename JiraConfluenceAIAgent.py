@@ -38,6 +38,7 @@ ATLASSIAN_API_TOKEN = "ATATT3xFfGF0uJY9cuMSM6d0bU_8KMUm2BSnw2PPvOJ5WXGRBfpKCrgw4
 JIRA_SOURCE_PROJECT_KEY = "ADEV"
 
 # Jira project key for action/approval tickets (approval flow)
+# NOTE: ACR project is assumed to already exist in Jira — no existence check is performed.
 JIRA_ACTION_PROJECT_KEY = "ACR"
 
 # Confluence page IDs (extracted from the URLs provided)
@@ -63,27 +64,6 @@ def jira_get(path: str, params: dict = None):
         except Exception:
             print(f"  [Jira GET] body: {r.text[:400]}")
     r.raise_for_status()
-    return r.json()
-
-
-def jira_get_silent(path: str, params: dict = None):
-    """
-    Make an authenticated Jira GET request.
-    Returns the parsed JSON on 2xx, or None on 404.
-    Raises for any other non-2xx status.
-    """
-    url = f"{ATLASSIAN_BASE}/rest/api/3{path}"
-    r = requests.get(url, auth=ATLASSIAN_AUTH, params=params,
-                     headers={"Accept": "application/json"})
-    if r.status_code == 404:
-        return None
-    if not r.ok:
-        print(f"  [Jira GET] {r.status_code} {r.reason}  →  {url}")
-        try:
-            print(f"  [Jira GET] body: {r.json()}")
-        except Exception:
-            print(f"  [Jira GET] body: {r.text[:400]}")
-        r.raise_for_status()
     return r.json()
 
 
@@ -138,7 +118,7 @@ def _jira_search(jql: str, max_results: int = 50) -> dict:
     print(f"  [Jira] Both search endpoints failed.")
     print(f"  [Jira] POST body : {r.text[:400]}")
     print(f"  [Jira] GET  body : {r2.text[:400]}")
-    r2.raise_for_status()   # raise on the most recent failure
+    r2.raise_for_status()
 
 
 def fetch_open_jiras(project_key: str = None, max_results: int = 50) -> list[dict]:
@@ -151,7 +131,6 @@ def fetch_open_jiras(project_key: str = None, max_results: int = 50) -> list[dic
     issues = []
     for item in data.get("issues", []):
         fields = item["fields"]
-        # Extract plain text from Atlassian Document Format description
         desc_text = _adf_to_text(fields.get("description") or {})
         issues.append({
             "key":         item["key"],
@@ -176,55 +155,6 @@ def _adf_to_text(node: dict, depth: int = 0) -> str:
     if ntype in ("paragraph", "heading", "listItem"):
         result += "\n"
     return result
-
-
-def ensure_acr_project_exists() -> bool:
-    """
-    Check if the ACR project exists in Jira using a silent 404-tolerant GET.
-    If it exists, proceed. If not, attempt to create it via POST /project.
-    Returns True if the project is available, False if creation also fails.
-    """
-    project_data = jira_get_silent(f"/project/{JIRA_ACTION_PROJECT_KEY}")
-
-    if project_data is not None:
-        # Project found — confirm and continue, no noisy errors
-        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} exists "
-              f"('{project_data.get('name', JIRA_ACTION_PROJECT_KEY)}').")
-        return True
-
-    # Project not found — attempt to create it
-    print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} not found — attempting to create …")
-    try:
-        # Discover account ID via /myself (best-effort; fall back to empty string)
-        account_id = ""
-        try:
-            myself = jira_get_silent("/myself")
-            if myself:
-                account_id = myself.get("accountId", "")
-        except Exception:
-            pass  # Non-fatal: Jira may still accept the create without leadAccountId
-
-        payload = {
-            "key":            JIRA_ACTION_PROJECT_KEY,
-            "name":           "AI Change Requests (ACR)",
-            "projectTypeKey": "software",
-            "description":    (
-                "Auto-generated approval tickets from the AI Agent pipeline. "
-                "Each ticket represents a recommended action for review and approval."
-            ),
-        }
-        if account_id:
-            payload["leadAccountId"] = account_id
-
-        jira_post("/project", payload)
-        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} created successfully.")
-        return True
-
-    except Exception as e:
-        print(f"  [Jira] WARNING: Could not create project {JIRA_ACTION_PROJECT_KEY}: {e}")
-        print(f"  [Jira] Will still attempt to create tickets in {JIRA_ACTION_PROJECT_KEY} — "
-              f"if it already exists in Jira, this is safe to ignore.")
-        return False
 
 
 def create_jira_ticket(project_key: str, summary: str, description: str,
@@ -269,7 +199,6 @@ def confluence_get_page_content(page_id: str) -> str:
     data = r.json()
     title   = data.get("title", "")
     storage = data["body"]["storage"]["value"]
-    # Strip HTML tags for readability
     plain = re.sub(r"<[^>]+>", " ", storage)
     plain = re.sub(r"\s{2,}", " ", plain).strip()
     return f"=== {title} ===\n\n{plain}"
@@ -327,7 +256,6 @@ def commit_file_to_github(owner: str, repo: str, path: str,
     """Create or update a file in the GitHub repo and commit it."""
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 
-    # Get current SHA if file exists
     sha = None
     try:
         r = requests.get(url, headers=GH_HEADERS)
@@ -363,18 +291,9 @@ def analyse_jira_with_claude(jira_issue: dict,
                               codebase: dict[str, str] | None = None) -> dict:
     """
     Send the Jira ticket + documentation to Claude.
-    Returns a structured dict:
-      {
-        "action_type":   "sql" | "code_change" | "config" | "manual" | "unknown",
-        "action_summary": str,         # one-liner for the new Jira title
-        "action_detail":  str,         # full, immediately actionable instructions
-        "files_to_change": [           # only present when action_type == "code_change"
-            {"path": str, "new_content": str}
-        ],
-        "sql":            str | None,  # the SQL to run (if action_type == "sql")
-      }
+    Returns a structured dict with action_type, action_summary, action_detail,
+    files_to_change, and sql.
     """
-
     codebase_section = ""
     if codebase:
         codebase_section = "\n\n## FULL CODEBASE\n"
@@ -414,7 +333,7 @@ def analyse_jira_with_claude(jira_issue: dict,
         {{
           "action_type":    "<one of: sql | code_change | config | manual | unknown>",
           "action_summary": "<concise one-liner suitable for a Jira ticket title>",
-          "action_detail":  "<step-by-step, immediately actionable instructions — include FULL SQL, FULL code patches, FULL CLI commands, etc.>",
+          "action_detail":  "<step-by-step, immediately actionable instructions>",
           "files_to_change": [
             {{"path": "<relative file path in repo>", "new_content": "<complete new file content>"}}
           ],
@@ -436,14 +355,12 @@ def analyse_jira_with_claude(jira_issue: dict,
     )
 
     raw = response.content[0].text.strip()
-    # Strip accidental markdown fences
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
 
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Return a safe fallback
         return {
             "action_type":    "unknown",
             "action_summary": f"AI analysis for {jira_issue['key']}",
@@ -462,10 +379,8 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
     print(f"  Processing: {issue['key']} – {issue['summary']}")
     print(f"{'='*60}")
 
-    # First pass: analyse without codebase
     analysis = analyse_jira_with_claude(issue, doc_page, troubleshoot_page)
 
-    # If Claude thinks we need a code change, load the codebase and re-analyse
     if analysis.get("action_type") == "code_change":
         print("  [Agent] Code change detected – loading full codebase …")
         codebase = load_full_codebase(GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
@@ -525,12 +440,12 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
 
     # ── Create the action Jira ticket in ACR (approval flow) ──────────
     new_summary = (f"[ACTION] {analysis.get('action_summary', issue['summary'])}"
-                   )[:250]  # Jira summary limit
+                   )[:250]
 
     print(f"  [Jira] Creating approval ticket in {JIRA_ACTION_PROJECT_KEY} …")
     try:
         new_ticket = create_jira_ticket(
-            project_key  = JIRA_ACTION_PROJECT_KEY,   # ← ACR for approval flow
+            project_key  = JIRA_ACTION_PROJECT_KEY,
             summary      = new_summary,
             description  = full_description,
             issue_type   = "Task",
@@ -547,10 +462,6 @@ def main():
     print("  Jira ↔ Confluence ↔ Claude ↔ GitHub Agent")
     print(f"  Source: {JIRA_SOURCE_PROJECT_KEY}  →  Approval: {JIRA_ACTION_PROJECT_KEY}")
     print("═" * 60)
-
-    # 0. Verify ACR project exists (silent check — no noisy 404 errors)
-    print(f"\n[Step 0] Verifying {JIRA_ACTION_PROJECT_KEY} project exists …")
-    ensure_acr_project_exists()
 
     # 1. Fetch Confluence documentation
     print("\n[Step 1] Fetching Confluence documentation pages …")
