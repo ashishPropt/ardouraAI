@@ -52,6 +52,7 @@ ATLASSIAN_AUTH = (ATLASSIAN_EMAIL, ATLASSIAN_API_TOKEN)
 # ─────────────────────────────────────────────
 
 def jira_get(path: str, params: dict = None):
+    """Make an authenticated Jira GET request; raises on non-2xx."""
     url = f"{ATLASSIAN_BASE}/rest/api/3{path}"
     r = requests.get(url, auth=ATLASSIAN_AUTH, params=params,
                      headers={"Accept": "application/json"})
@@ -62,6 +63,27 @@ def jira_get(path: str, params: dict = None):
         except Exception:
             print(f"  [Jira GET] body: {r.text[:400]}")
     r.raise_for_status()
+    return r.json()
+
+
+def jira_get_silent(path: str, params: dict = None):
+    """
+    Make an authenticated Jira GET request.
+    Returns the parsed JSON on 2xx, or None on 404.
+    Raises for any other non-2xx status.
+    """
+    url = f"{ATLASSIAN_BASE}/rest/api/3{path}"
+    r = requests.get(url, auth=ATLASSIAN_AUTH, params=params,
+                     headers={"Accept": "application/json"})
+    if r.status_code == 404:
+        return None
+    if not r.ok:
+        print(f"  [Jira GET] {r.status_code} {r.reason}  →  {url}")
+        try:
+            print(f"  [Jira GET] body: {r.json()}")
+        except Exception:
+            print(f"  [Jira GET] body: {r.text[:400]}")
+        r.raise_for_status()
     return r.json()
 
 
@@ -158,36 +180,50 @@ def _adf_to_text(node: dict, depth: int = 0) -> str:
 
 def ensure_acr_project_exists() -> bool:
     """
-    Check if the ACR project exists in Jira. If not, create it.
-    Returns True if the project is available (exists or was just created).
+    Check if the ACR project exists in Jira using a silent 404-tolerant GET.
+    If it exists, proceed. If not, attempt to create it via POST /project.
+    Returns True if the project is available, False if creation also fails.
     """
-    try:
-        jira_get(f"/project/{JIRA_ACTION_PROJECT_KEY}")
-        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} exists.")
-        return True
-    except Exception:
-        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} not found — attempting to create …")
+    project_data = jira_get_silent(f"/project/{JIRA_ACTION_PROJECT_KEY}")
 
+    if project_data is not None:
+        # Project found — confirm and continue, no noisy errors
+        print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} exists "
+              f"('{project_data.get('name', JIRA_ACTION_PROJECT_KEY)}').")
+        return True
+
+    # Project not found — attempt to create it
+    print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} not found — attempting to create …")
     try:
-        # Fetch the current user's account ID for project lead
-        myself = jira_get("/myself")
-        account_id = myself.get("accountId", "")
+        # Discover account ID via /myself (best-effort; fall back to empty string)
+        account_id = ""
+        try:
+            myself = jira_get_silent("/myself")
+            if myself:
+                account_id = myself.get("accountId", "")
+        except Exception:
+            pass  # Non-fatal: Jira may still accept the create without leadAccountId
 
         payload = {
             "key":            JIRA_ACTION_PROJECT_KEY,
             "name":           "AI Change Requests (ACR)",
             "projectTypeKey": "software",
-            "leadAccountId":  account_id,
             "description":    (
                 "Auto-generated approval tickets from the AI Agent pipeline. "
                 "Each ticket represents a recommended action for review and approval."
             ),
         }
+        if account_id:
+            payload["leadAccountId"] = account_id
+
         jira_post("/project", payload)
         print(f"  [Jira] Project {JIRA_ACTION_PROJECT_KEY} created successfully.")
         return True
+
     except Exception as e:
-        print(f"  [Jira] Could not create project {JIRA_ACTION_PROJECT_KEY}: {e}")
+        print(f"  [Jira] WARNING: Could not create project {JIRA_ACTION_PROJECT_KEY}: {e}")
+        print(f"  [Jira] Will still attempt to create tickets in {JIRA_ACTION_PROJECT_KEY} — "
+              f"if it already exists in Jira, this is safe to ignore.")
         return False
 
 
@@ -512,7 +548,7 @@ def main():
     print(f"  Source: {JIRA_SOURCE_PROJECT_KEY}  →  Approval: {JIRA_ACTION_PROJECT_KEY}")
     print("═" * 60)
 
-    # 0. Ensure ACR project exists (create if absent)
+    # 0. Verify ACR project exists (silent check — no noisy 404 errors)
     print(f"\n[Step 0] Verifying {JIRA_ACTION_PROJECT_KEY} project exists …")
     ensure_acr_project_exists()
 
