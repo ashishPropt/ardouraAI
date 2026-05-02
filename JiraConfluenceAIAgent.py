@@ -2,7 +2,7 @@
 Jira-Confluence-Claude-GitHub AI Agent
 ========================================
 Workflow:
-  1. Receive the newly-created Jira issue key (CLI arg or JIRA_ISSUE_KEY env var)
+  1. Receive the newly-created Jira issue key via --issue argument
   2. Fetch ONLY that single ticket — not all open tickets
   3. Pull two Confluence documentation pages
   4. Use Claude as an AI brain to determine the recommended action
@@ -10,14 +10,15 @@ Workflow:
   6. Create a new Jira ticket in ACR project (approval flow) with the recommended action
 
 Usage:
-  python JiraConfluenceAIAgent.py ADEV-42
-  # or
+  python JiraConfluenceAIAgent.py --issue ADEV-42
+  # or via environment variable (fallback):
   JIRA_ISSUE_KEY=ADEV-42 python JiraConfluenceAIAgent.py
 """
 
 import os
 import re
 import sys
+import argparse
 import base64
 import json
 import textwrap
@@ -465,12 +466,25 @@ def resolve_issue_key() -> str | None:
     """
     Determine which single Jira issue to process.
     Priority order:
-      1. First CLI argument:  python JiraConfluenceAIAgent.py ADEV-42
-      2. Environment variable: JIRA_ISSUE_KEY=ADEV-42
+      1. --issue CLI argument:  python JiraConfluenceAIAgent.py --issue ADEV-42
+      2. Environment variable fallback: JIRA_ISSUE_KEY=ADEV-42
     Returns None if neither is provided.
     """
-    if len(sys.argv) > 1:
-        return sys.argv[1].strip()
+    parser = argparse.ArgumentParser(
+        description="Jira ↔ Confluence ↔ Claude ↔ GitHub AI Agent"
+    )
+    parser.add_argument(
+        "--issue",
+        metavar="ISSUE_KEY",
+        help="Jira issue key to process (e.g. ADEV-42)",
+        default=None,
+    )
+    args, _ = parser.parse_known_args()
+
+    if args.issue:
+        return args.issue.strip()
+
+    # Fallback: environment variable
     return os.environ.get("JIRA_ISSUE_KEY", "").strip() or None
 
 
@@ -484,7 +498,7 @@ def main():
     issue_key = resolve_issue_key()
     if not issue_key:
         print("\n[ERROR] No Jira issue key provided.")
-        print("  Usage:  python JiraConfluenceAIAgent.py ADEV-42")
+        print("  Usage:  python JiraConfluenceAIAgent.py --issue ADEV-42")
         print("    or:   JIRA_ISSUE_KEY=ADEV-42 python JiraConfluenceAIAgent.py")
         sys.exit(1)
 
