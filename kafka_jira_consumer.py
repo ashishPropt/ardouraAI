@@ -8,10 +8,10 @@ import os
 TARGET_PROJECT_KEY   = "ADEV"
 TARGET_WEBHOOK_EVENT = "jira:issue_created"
 
-# Path to the AI agent script
+# Path to the MCP AI agent script — resolved relative to this file's location
 AGENT_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "JiraConfluenceAIAgent.py"
+    "JiraConfluenceAIAgent_mcp.py"
 )
 
 consumer = KafkaConsumer(
@@ -32,7 +32,7 @@ for message in consumer:
     issue_key     = issue.get('key', '')
     project_key   = issue.get('fields', {}).get('project', {}).get('key', '')
 
-    # ── Guard 1: must be an issue_created event ────────────────────────
+    # ── Guard 1: must be an issue_created event ───────────────────────
     if webhook_event != TARGET_WEBHOOK_EVENT:
         print(f"[Consumer] Skipped – event type '{webhook_event}' is not issue_created")
         continue
@@ -46,7 +46,7 @@ for message in consumer:
         print("[Consumer] Skipped – could not determine issue key from event payload")
         continue
 
-    print(f"[Consumer] New {TARGET_PROJECT_KEY} issue detected: {issue_key} – triggering AI agent ...")
+    print(f"[Consumer] New {TARGET_PROJECT_KEY} issue detected: {issue_key} – triggering MCP AI agent ...")
 
     result = subprocess.run(
         [
