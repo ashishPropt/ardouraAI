@@ -2,15 +2,22 @@
 Jira-Confluence-Claude-GitHub AI Agent
 ========================================
 Workflow:
-  1. Fetch open Jira tickets from ADEV project
-  2. Pull two Confluence documentation pages
-  3. Use Claude as an AI brain to determine the recommended action per ticket
-  4. If the action requires a code change → fetch the full GitHub repo, apply the change, commit
-  5. Create a new Jira ticket in ACR project (approval flow) with the recommended action
+  1. Receive the newly-created Jira issue key (CLI arg or JIRA_ISSUE_KEY env var)
+  2. Fetch ONLY that single ticket — not all open tickets
+  3. Pull two Confluence documentation pages
+  4. Use Claude as an AI brain to determine the recommended action
+  5. If the action requires a code change → fetch the full GitHub repo, apply the change, commit
+  6. Create a new Jira ticket in ACR project (approval flow) with the recommended action
+
+Usage:
+  python JiraConfluenceAIAgent.py ADEV-42
+  # or
+  JIRA_ISSUE_KEY=ADEV-42 python JiraConfluenceAIAgent.py
 """
 
 import os
 import re
+import sys
 import base64
 import json
 import textwrap
@@ -82,6 +89,25 @@ def jira_post(path: str, payload: dict):
     return r.json()
 
 
+def fetch_single_jira(issue_key: str) -> dict:
+    """
+    Fetch a single Jira issue by its key (e.g. 'ADEV-42').
+    Returns a normalised issue dict identical to what fetch_open_jiras() returns.
+    """
+    print(f"  [Jira] Fetching single issue: {issue_key} …")
+    data = jira_get(f"/issue/{issue_key}")
+    fields = data["fields"]
+    desc_text = _adf_to_text(fields.get("description") or {})
+    return {
+        "key":         data["key"],
+        "summary":     fields.get("summary", ""),
+        "description": desc_text,
+        "status":      fields["status"]["name"],
+        "priority":    (fields.get("priority") or {}).get("name", ""),
+        "issuetype":   fields["issuetype"]["name"],
+    }
+
+
 def _jira_search(jql: str, max_results: int = 50) -> dict:
     """
     Search Jira issues using the current POST /search/jql endpoint.
@@ -119,28 +145,6 @@ def _jira_search(jql: str, max_results: int = 50) -> dict:
     print(f"  [Jira] POST body : {r.text[:400]}")
     print(f"  [Jira] GET  body : {r2.text[:400]}")
     r2.raise_for_status()
-
-
-def fetch_open_jiras(project_key: str = None, max_results: int = 50) -> list[dict]:
-    """Return a list of open Jira issues (all projects, or scoped to one)."""
-    jql = "status != Done AND status != Closed ORDER BY created DESC"
-    if project_key:
-        jql = f"project = {project_key} AND {jql}"
-
-    data   = _jira_search(jql, max_results)
-    issues = []
-    for item in data.get("issues", []):
-        fields = item["fields"]
-        desc_text = _adf_to_text(fields.get("description") or {})
-        issues.append({
-            "key":         item["key"],
-            "summary":     fields.get("summary", ""),
-            "description": desc_text,
-            "status":      fields["status"]["name"],
-            "priority":    (fields.get("priority") or {}).get("name", ""),
-            "issuetype":   fields["issuetype"]["name"],
-        })
-    return issues
 
 
 def _adf_to_text(node: dict, depth: int = 0) -> str:
@@ -457,11 +461,38 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
         print(f"  [Jira] ERROR creating ticket: {e}")
 
 
+def resolve_issue_key() -> str | None:
+    """
+    Determine which single Jira issue to process.
+    Priority order:
+      1. First CLI argument:  python JiraConfluenceAIAgent.py ADEV-42
+      2. Environment variable: JIRA_ISSUE_KEY=ADEV-42
+    Returns None if neither is provided.
+    """
+    if len(sys.argv) > 1:
+        return sys.argv[1].strip()
+    return os.environ.get("JIRA_ISSUE_KEY", "").strip() or None
+
+
 def main():
     print("\n" + "═" * 60)
     print("  Jira ↔ Confluence ↔ Claude ↔ GitHub Agent")
     print(f"  Source: {JIRA_SOURCE_PROJECT_KEY}  →  Approval: {JIRA_ACTION_PROJECT_KEY}")
     print("═" * 60)
+
+    # ── Resolve which issue to process ────────────────────────────────
+    issue_key = resolve_issue_key()
+    if not issue_key:
+        print("\n[ERROR] No Jira issue key provided.")
+        print("  Usage:  python JiraConfluenceAIAgent.py ADEV-42")
+        print("    or:   JIRA_ISSUE_KEY=ADEV-42 python JiraConfluenceAIAgent.py")
+        sys.exit(1)
+
+    # Validate the key belongs to the expected project
+    expected_prefix = f"{JIRA_SOURCE_PROJECT_KEY}-"
+    if not issue_key.upper().startswith(expected_prefix):
+        print(f"\n[WARNING] Issue key '{issue_key}' does not belong to project "
+              f"'{JIRA_SOURCE_PROJECT_KEY}'. Proceeding anyway …")
 
     # 1. Fetch Confluence documentation
     print("\n[Step 1] Fetching Confluence documentation pages …")
@@ -470,46 +501,22 @@ def main():
     print(f"  Loaded doc page       : {len(doc_page):,} chars")
     print(f"  Loaded troubleshoot pg: {len(troubleshoot_page):,} chars")
 
-    # 2. Fetch open Jira tickets from ADEV (source project)
-    print(f"\n[Step 2] Fetching open Jira tickets from {JIRA_SOURCE_PROJECT_KEY} …")
-    issues = []
+    # 2. Fetch the single newly-created Jira ticket
+    print(f"\n[Step 2] Fetching Jira issue {issue_key} …")
     try:
-        issues = fetch_open_jiras(project_key=JIRA_SOURCE_PROJECT_KEY)
+        issue = fetch_single_jira(issue_key)
     except Exception as e:
-        print(f"  Project key '{JIRA_SOURCE_PROJECT_KEY}' failed ({e}) — trying without filter")
-    if not issues:
-        try:
-            issues = fetch_open_jiras()
-        except Exception as e:
-            print(f"  Could not fetch Jira issues: {e}")
-            try:
-                proj_data = jira_get("/project/search",
-                                     params={"maxResults": 10, "orderBy": "key"})
-                keys = [p["key"] for p in proj_data.get("values", [])]
-                print(f"  Discovered project keys: {keys}")
-                for k in keys:
-                    try:
-                        issues = fetch_open_jiras(project_key=k)
-                        if issues:
-                            print(f"  Using project key: {k}")
-                            break
-                    except Exception:
-                        continue
-            except Exception as e2:
-                print(f"  Project discovery also failed: {e2}")
+        print(f"  [ERROR] Could not fetch issue {issue_key}: {e}")
+        sys.exit(1)
 
-    print(f"  Found {len(issues)} open ticket(s)")
-    if not issues:
-        print("  Nothing to process. Exiting.")
-        return
+    print(f"  Fetched: [{issue['key']}] {issue['summary']} (status: {issue['status']})")
 
-    # 3. Process each issue → create ACR approval ticket
-    print(f"\n[Step 3] Analysing each ticket with Claude → creating {JIRA_ACTION_PROJECT_KEY} approval tickets …")
-    for issue in issues:
-        try:
-            process_jira_issue(issue, doc_page, troubleshoot_page)
-        except Exception as e:
-            print(f"  ERROR processing {issue['key']}: {e}")
+    # 3. Process the single issue → create ACR approval ticket
+    print(f"\n[Step 3] Analysing {issue['key']} with Claude → creating {JIRA_ACTION_PROJECT_KEY} approval ticket …")
+    try:
+        process_jira_issue(issue, doc_page, troubleshoot_page)
+    except Exception as e:
+        print(f"  ERROR processing {issue['key']}: {e}")
 
     print("\n" + "═" * 60)
     print("  Agent run complete.")
