@@ -1,0 +1,54 @@
+# =============================================================================
+# ardouraAI — .gitignore
+# =============================================================================
+
+# ── Secrets & credentials — NEVER commit these ────────────────────────────────
+.env
+*.env
+.env.*
+!.env          # redundant safety: explicitly block .env even if negated elsewhere
+
+# ── Backup files created by the update workflow ───────────────────────────────
+*_backup*.py
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.cover
+.coverage
+htmlcov/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── IDEs & editors ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# ── OS artefacts ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs & temp files ────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
