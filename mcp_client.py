@@ -13,6 +13,12 @@ Usage:
     files  = github.load_codebase("ashishPropt", "ArdouraAI")
 
 Each MCP class spawns its server as a subprocess and communicates via stdio.
+
+FIX: Performs the full MCP handshake before every tool call:
+  1. initialize  (request  id=0)
+  2. initialized (notification — no id)
+  3. tools/call  (request  id=1)
+The server rejects any tool call received before initialization is complete.
 """
 
 import json
@@ -25,45 +31,94 @@ from typing import Any
 class _MCPClient:
     """
     Minimal synchronous MCP stdio client.
-    Sends a single tools/call request and reads the response.
+
+    Sends the full MCP handshake then a single tools/call request,
+    all via subprocess stdin/stdout.
     """
 
     def __init__(self, server_script: str):
         self._script = server_script
 
+    # ── helpers ───────────────────────────────────────────────────────
+    @staticmethod
+    def _frame(obj: dict) -> bytes:
+        """Encode a JSON-RPC object as a newline-terminated UTF-8 line."""
+        return (json.dumps(obj) + "\n").encode("utf-8")
+
+    # ── public API ────────────────────────────────────────────────────
     def call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Call a tool on the server; returns the parsed JSON result."""
-        # Build a minimal JSON-RPC 2.0 request as the MCP host would
-        request = {
+        """
+        Perform the MCP handshake, call one tool, return the parsed result.
+
+        Stdin to the server consists of three newline-delimited JSON frames:
+          1. initialize request   (id=0)
+          2. initialized notify   (no id — notification)
+          3. tools/call request   (id=1)
+        """
+
+        # ── 1. initialize ─────────────────────────────────────────────
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "mcp_client.py", "version": "1.0"},
+            },
+        }
+
+        # ── 2. initialized notification (no id → server won't reply) ──
+        init_notify = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }
+
+        # ── 3. tools/call ─────────────────────────────────────────────
+        tool_req = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
         }
-        req_bytes = (json.dumps(request) + "\n").encode("utf-8")
 
-        # Spawn server, pass request, read response
-        env = {**os.environ}  # inherit all env vars (includes credentials)
+        stdin_bytes = (
+            self._frame(init_req)
+            + self._frame(init_notify)
+            + self._frame(tool_req)
+        )
+
+        env = {**os.environ}  # inherit all env vars (credentials etc.)
         proc = subprocess.run(
             [sys.executable, self._script],
-            input=req_bytes,
+            input=stdin_bytes,
             capture_output=True,
             env=env,
             timeout=120,
         )
 
-        # The MCP server writes multiple newline-delimited JSON frames.
-        # The response to our call is the frame with matching id.
+        # ── Parse newline-delimited JSON frames from stdout ────────────
+        # We want the frame whose id == 1 (our tools/call response).
+        # Frame id=0 is the initialize response — we skip it.
         for line in proc.stdout.splitlines():
-            if not line.strip():
+            line = line.strip()
+            if not line:
                 continue
             try:
                 frame = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if frame.get("id") == 1 and "result" in frame:
-                # result.content is a list of TextContent objects
-                content_list = frame["result"].get("content", [])
+
+            if frame.get("id") == 1:
+                # Check for JSON-RPC error
+                if "error" in frame:
+                    err = frame["error"]
+                    raise RuntimeError(
+                        f"MCP tool '{tool_name}' returned error "
+                        f"{err.get('code')}: {err.get('message')}"
+                    )
+                # Success — extract TextContent
+                content_list = frame.get("result", {}).get("content", [])
                 if content_list:
                     text = content_list[0].get("text", "")
                     try:
@@ -71,10 +126,12 @@ class _MCPClient:
                     except json.JSONDecodeError:
                         return text
 
-        # If we get here the server may have errored
+        # Nothing matched — surface stderr for debugging
         stderr = proc.stderr.decode("utf-8", errors="replace")
+        stdout = proc.stdout.decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"MCP call to '{tool_name}' failed.\n"
+            f"MCP call to '{tool_name}' failed — no id=1 response found.\n"
+            f"stdout: {stdout[:600]}\n"
             f"stderr: {stderr[:400]}"
         )
 
