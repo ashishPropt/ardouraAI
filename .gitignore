@@ -4,9 +4,12 @@
 
 # ── Secrets & credentials — NEVER commit these ────────────────────────────────
 .env
+
+# Keep the template in source control, ignore everything else .env-like
+!.env.template
 *.env
-.env.*
-!.env          # redundant safety: explicitly block .env even if negated elsewhere
+.env.local
+.env.*.local
 
 # ── Backup files created by the update workflow ───────────────────────────────
 *_backup*.py
