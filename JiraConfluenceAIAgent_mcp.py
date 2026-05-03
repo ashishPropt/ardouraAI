@@ -22,7 +22,7 @@ Workflow:
   7. Create an action/approval ticket in ACR   → via JiraMCP server
 
 All credentials come from environment variables (or .env file).
-See .env for the full list of required variables.
+See .env.template for the full list of required variables.
 
 Usage:
   python JiraConfluenceAIAgent_mcp.py --issue ADEV-42
@@ -41,13 +41,22 @@ from pathlib import Path
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
-# Load .env (safe — does not override existing env vars)
-load_dotenv(Path(__file__).parent / ".env")
+# Force .env to always win over stale system/user environment variables.
+# Without override=True, a stale ANTHROPIC_API_KEY set in Windows environment
+# variables silently takes precedence and causes 401 auth errors.
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(_env_path, override=True)
 
 from mcp_client import GitHubMCP, JiraMCP, ConfluenceMCP
 
 # ── Config from environment ───────────────────────────────────────────────────
 ANTHROPIC_API_KEY        = os.environ["ANTHROPIC_API_KEY"]
+
+# Startup diagnostic — shows which key is active so 401s are immediately obvious
+_k = ANTHROPIC_API_KEY
+print(f"[Auth] ANTHROPIC_API_KEY = {_k[:20]}...{_k[-6:]}")
+if not _k.startswith("sk-ant-"):
+    print("[Auth] WARNING: key does not look like a valid Anthropic key — expect 401s")
 
 # APPLICATION GitHub — the repo the agent acts ON (e.g. Princetondawgs)
 # DO NOT point these at the ardouraAI repo.
@@ -311,7 +320,7 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
     github_was_loaded  = False
     codebase: dict[str, str] = {}
 
-    # ── PASS 1: Confluence-only analysis ──────────────────────────────
+    # ── PASS 1: Confluence-only analysis ─────────────────────────────
     print("  [Agent] Pass 1: Confluence-only analysis …")
     analysis = analyse_with_confluence(issue, doc_page, troubleshoot_page)
     print(f"  [Agent] Confidence  : {analysis.get('confidence')}")
@@ -322,7 +331,7 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
         or analysis.get("action_type") in ("unknown", "code_change")
     )
 
-    # ── PASS 2 (if needed): Load Application GitHub + re-analyse ──────
+    # ── PASS 2 (if needed): Load Application GitHub + re-analyse ─────
     if needs_github:
         print(f"  [Agent] Pass 2: Loading Application GitHub "
               f"({APP_GITHUB_OWNER}/{APP_GITHUB_REPO}) …")
@@ -356,7 +365,6 @@ def process_jira_issue(issue: dict, doc_page: str, troubleshoot_page: str) -> No
     committed_files: list[dict] = []
     if analysis.get("action_type") == "code_change":
         if not github_was_loaded:
-            # Shouldn't happen after Pass-2 logic above, but be safe
             codebase = app_github.load_codebase(
                 APP_GITHUB_OWNER, APP_GITHUB_REPO, APP_GITHUB_BRANCH
             )
