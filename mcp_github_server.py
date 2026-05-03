@@ -26,12 +26,16 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-# ── Credentials ───────────────────────────────────────────────────────────────────
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GH_HEADERS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github+json",
-}
+# ── Credentials ───────────────────────────────────────────────────────────────
+# Read token lazily at call time (not at import time) so the subprocess always
+# picks up the value inherited from the parent process's environment.
+def _gh_headers() -> dict:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
 CODE_EXTENSIONS = (
     ".py", ".js", ".ts", ".java", ".go", ".rb", ".cs",
     ".yaml", ".yml", ".sql", ".sh", ".tf", ".php", ".html", ".css",
@@ -40,7 +44,7 @@ CODE_EXTENSIONS = (
 # Skip files larger than 200 KB to avoid blowing out the MCP stdout buffer
 MAX_FILE_BYTES = 200_000
 
-# ── Server ────────────────────────────────────────────────────────────────────────
+# ── Server ────────────────────────────────────────────────────────────────────
 app = Server("github-server")
 
 
@@ -111,25 +115,25 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
-    # ── github_get_repo_tree ───────────────────────────────────────────────
+    # ── github_get_repo_tree ───────────────────────────────────────────
     if name == "github_get_repo_tree":
         owner  = arguments["owner"]
         repo   = arguments["repo"]
         branch = arguments.get("branch", "main")
         url = (f"https://api.github.com/repos/{owner}/{repo}"
                f"/git/trees/{branch}?recursive=1")
-        r = requests.get(url, headers=GH_HEADERS, timeout=30)
+        r = requests.get(url, headers=_gh_headers(), timeout=30)
         r.raise_for_status()
         paths = [i["path"] for i in r.json().get("tree", []) if i["type"] == "blob"]
         return [TextContent(type="text", text=json.dumps(paths))]
 
-    # ── github_get_file ──────────────────────────────────────────────────────
+    # ── github_get_file ────────────────────────────────────────────────
     if name == "github_get_file":
         owner = arguments["owner"]
         repo  = arguments["repo"]
         path  = arguments["path"]
         url   = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-        r = requests.get(url, headers=GH_HEADERS, timeout=30)
+        r = requests.get(url, headers=_gh_headers(), timeout=30)
         r.raise_for_status()
         data    = r.json()
         content = base64.b64decode(
@@ -139,7 +143,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                             text=json.dumps({"content": content, "sha": data["sha"],
                                              "path": path}))]
 
-    # ── github_commit_file ───────────────────────────────────────────────────────
+    # ── github_commit_file ─────────────────────────────────────────────
     if name == "github_commit_file":
         owner   = arguments["owner"]
         repo    = arguments["repo"]
@@ -150,7 +154,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         url     = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 
         sha = None
-        get_r = requests.get(url, headers=GH_HEADERS, timeout=30)
+        get_r = requests.get(url, headers=_gh_headers(), timeout=30)
         if get_r.status_code == 200:
             sha = get_r.json().get("sha")
 
@@ -163,7 +167,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if sha:
             payload["sha"] = sha
 
-        r = requests.put(url, headers=GH_HEADERS, json=payload, timeout=30)
+        r = requests.put(url, headers=_gh_headers(), json=payload, timeout=30)
         r.raise_for_status()
         commit_sha = r.json().get("commit", {}).get("sha", "")
         return [TextContent(type="text",
@@ -171,7 +175,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                                              "commit_sha": commit_sha,
                                              "path": path}))]
 
-    # ── github_load_codebase ───────────────────────────────────────────────
+    # ── github_load_codebase ───────────────────────────────────────────
     if name == "github_load_codebase":
         owner  = arguments["owner"]
         repo   = arguments["repo"]
@@ -180,7 +184,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # GitHub truncates recursive trees for large repos — note it in errors.
         tree_url = (f"https://api.github.com/repos/{owner}/{repo}"
                     f"/git/trees/{branch}?recursive=1")
-        r = requests.get(tree_url, headers=GH_HEADERS, timeout=30)
+        r = requests.get(tree_url, headers=_gh_headers(), timeout=30)
         r.raise_for_status()
         tree_data = r.json()
 
@@ -201,7 +205,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 continue
             try:
                 fu = f"https://api.github.com/repos/{owner}/{repo}/contents/{p}"
-                fr = requests.get(fu, headers=GH_HEADERS, timeout=30)
+                fr = requests.get(fu, headers=_gh_headers(), timeout=30)
                 fr.raise_for_status()
                 fdata = fr.json()
 
@@ -235,7 +239,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 async def main():
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
