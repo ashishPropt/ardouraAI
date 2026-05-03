@@ -180,6 +180,18 @@ class GitHubMCP:
         """Returns {path: content} dict of all source files in the APPLICATION repo."""
         result = self._client.call("github_load_codebase",
                                    {"owner": owner, "repo": repo, "branch": branch})
+        # Guard: if the MCP server returned a raw string (e.g. truncated/error
+        # response) instead of a parsed dict, raise clearly rather than letting
+        # a confusing 'str has no attribute get' bubble up in the agent.
+        if isinstance(result, str):
+            raise RuntimeError(
+                f"github_load_codebase returned a string instead of a dict. "
+                f"MCP server error or stdout overflow. Response: {result[:300]}"
+            )
+        errors = result.get("errors", [])
+        if errors:
+            for e in errors:
+                print(f"  [AppGitHub-MCP] {e}")
         return result.get("files", {})
 
 
