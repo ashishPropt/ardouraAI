@@ -6,11 +6,17 @@ Lightweight synchronous MCP client helper.
 Wraps the three MCP servers as simple Python callables so the agent
 scripts don't need to know anything about MCP transport details.
 
+NOTE ON GITHUB
+--------------
+GitHubMCP connects to the APPLICATION GitHub repo (e.g. Princetondawgs).
+It NEVER touches the ardouraAI repo (the agent code itself).
+Keep APP_GITHUB_OWNER / APP_GITHUB_REPO / APP_GITHUB_BRANCH in .env.
+
 Usage:
     from mcp_client import GitHubMCP, JiraMCP, ConfluenceMCP
 
-    github = GitHubMCP()
-    files  = github.load_codebase("ashishPropt", "ArdouraAI")
+    app_github = GitHubMCP()
+    files      = app_github.load_codebase("ashishPropt", "Princetondawgs")
 
 Each MCP class spawns its server as a subprocess and communicates via stdio.
 
@@ -141,7 +147,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class GitHubMCP:
-    """Wrapper around mcp_github_server.py."""
+    """
+    Wrapper around mcp_github_server.py.
+
+    Connects to the APPLICATION GitHub repo — never to the ardouraAI repo.
+    Configure via APP_GITHUB_OWNER / APP_GITHUB_REPO / APP_GITHUB_BRANCH in .env.
+    """
 
     def __init__(self):
         self._client = _MCPClient(os.path.join(_HERE, "mcp_github_server.py"))
@@ -166,7 +177,7 @@ class GitHubMCP:
 
     def load_codebase(self, owner: str, repo: str,
                       branch: str = "main") -> dict[str, str]:
-        """Returns {path: content} dict of all source files."""
+        """Returns {path: content} dict of all source files in the APPLICATION repo."""
         result = self._client.call("github_load_codebase",
                                    {"owner": owner, "repo": repo, "branch": branch})
         return result.get("files", {})
@@ -216,6 +227,16 @@ class ConfluenceMCP:
         """Returns the plain-text content of the page (with title header)."""
         result = self._client.call("confluence_get_page", {"page_id": page_id})
         return result.get("text", "")
+
+    def get_page_by_title(self, space_key: str, title: str) -> str | None:
+        """
+        Look up a page by space + title and return its text content.
+        Returns None if the page does not exist.
+        """
+        page_id = self.find_page_id(space_key, title)
+        if not page_id:
+            return None
+        return self.get_page(page_id)
 
     def find_page_id(self, space_key: str, title: str) -> str | None:
         result = self._client.call("confluence_find_page_id",
