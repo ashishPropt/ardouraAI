@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in your values.
+# NEVER commit terraform.tfvars – it is in .gitignore.
+
+vultr_api_key = "YOUR_VULTR_API_KEY"
+region        = "ewr"           # Newark (closest to Princeton NJ)
+plan          = "vc2-2c-4gb"   # 2 vCPU / 4 GB RAM
+app_hostname  = "ardoura-ai"
+
+# Optional: Vultr SSH key ID (find in console → Account → SSH Keys)
+ssh_key_id    = ""
+
+# Optional: set your domain to get a DNS A-record automatically
+dns_domain    = ""             # e.g. "princetondawgs.com"
+dns_subdomain = "ardoura"      # → ardoura.princetondawgs.com

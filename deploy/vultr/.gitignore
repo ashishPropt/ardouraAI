@@ -1,0 +1,10 @@
+# Vultr provisioner state – contains resource IDs and DB credentials
+.vultr_state.json
+
+# Terraform secrets
+terraform/terraform.tfvars
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfplan

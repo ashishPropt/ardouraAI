@@ -1,0 +1,227 @@
+# =============================================================================
+# ArdouraAI – Docker Compose  (Vultr deployment)
+#
+# Services:
+#   zookeeper          – Kafka coordination
+#   kafka              – Message broker (replaces local Docker)
+#   flask-producer     – Webhook receiver + Kafka producer  (port 5000)
+#   jira-consumer      – AI triage agent for Jira tickets
+#   obs-consumer       – Observability alert consumer
+#   mcp-jira           – MCP Jira server
+#   mcp-confluence     – MCP Confluence server
+#   mcp-github         – MCP GitHub server
+#   mcp-observability  – MCP Observability server
+#
+# Secrets are read from .env in the repo root (written by startup.sh).
+# =============================================================================
+
+version: "3.9"
+
+x-common-env: &common-env
+  env_file:
+    - /opt/ardoura/.env
+
+services:
+
+  # ── Zookeeper ────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zk-data:/var/lib/zookeeper/data
+      - zk-log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka ─────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"       # internal (other containers)
+      - "9093:9093"       # external (host → container, for debugging)
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka topic initialiser (runs once, then exits) ────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        for topic in jira-events dynatrace-alerts datadog-alerts grafana-alerts; do
+          kafka-topics --bootstrap-server kafka:9092 \
+            --create --if-not-exists \
+            --topic $$topic \
+            --partitions 1 \
+            --replication-factor 1
+          echo "Topic $$topic ready"
+        done
+
+  # ── Flask webhook receiver / Kafka producer ───────────────────────────────
+  flask-producer:
+    image: python:3.11-slim
+    container_name: flask-producer
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+    <<: *common-env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    command: >-
+      bash -c "
+        pip install --quiet flask kafka-python python-dotenv &&
+        python kafka_jira_producer.py
+      "
+    ports:
+      - "5000:5000"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Jira AI consumer ──────────────────────────────────────────────────────
+  jira-consumer:
+    image: python:3.11-slim
+    container_name: jira-consumer
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+    <<: *common-env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    command: >-
+      bash -c "
+        pip install --quiet -r requirements.txt kafka-python &&
+        python kafka_jira_consumer.py
+      "
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+
+  # ── Observability consumer ────────────────────────────────────────────────
+  obs-consumer:
+    image: python:3.11-slim
+    container_name: obs-consumer
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+    <<: *common-env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    command: >-
+      bash -c "
+        pip install --quiet -r requirements.txt kafka-python &&
+        python kafka_observability_consumer.py
+      "
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+
+  # ── MCP Jira server ───────────────────────────────────────────────────────
+  mcp-jira:
+    image: python:3.11-slim
+    container_name: mcp-jira
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+    <<: *common-env
+    command: >-
+      bash -c "
+        pip install --quiet -r requirements.txt &&
+        python mcp_jira_server.py
+      "
+
+  # ── MCP Confluence server ─────────────────────────────────────────────────
+  mcp-confluence:
+    image: python:3.11-slim
+    container_name: mcp-confluence
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+    <<: *common-env
+    command: >-
+      bash -c "
+        pip install --quiet -r requirements.txt &&
+        python mcp_confluence_server.py
+      "
+
+  # ── MCP GitHub server ─────────────────────────────────────────────────────
+  mcp-github:
+    image: python:3.11-slim
+    container_name: mcp-github
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+    <<: *common-env
+    command: >-
+      bash -c "
+        pip install --quiet -r requirements.txt &&
+        python mcp_github_server.py
+      "
+
+  # ── MCP Observability server ──────────────────────────────────────────────
+  mcp-observability:
+    image: python:3.11-slim
+    container_name: mcp-observability
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+    <<: *common-env
+    command: >-
+      bash -c "
+        pip install --quiet -r requirements.txt &&
+        python mcp_observability_server.py
+      "
+
+volumes:
+  zk-data:
+  zk-log:
+  kafka-data:
