@@ -5,12 +5,15 @@ JiraConfluenceAIAgent_mcp.py
 AI agent that:
   1. Reads an ADEV Jira issue
   2. Checks Confluence docs for context
-  3. Checks GitHub codebase for impact
-  4. Uses Claude to analyse and plan the fix
+  3. Reads relevant GitHub files
+  4. Uses Claude to analyse, plan AND generate the actual code fix
   5. Creates an ACR ticket linked to the ADEV as 'fixes'
-  6. If Claude deems execution safe -> transitions ACR to In Progress
-     Otherwise -> leaves ACR Open and assigns to the operator
-  7. Adds a detailed comment to both ADEV and ACR
+  6. If execution_safe=True (LOW blast radius):
+       - Commits the code changes to GitHub
+       - Transitions ACR to In Progress then Done
+     Otherwise:
+       - Leaves ACR Open, assigns to operator for manual review
+  7. Adds detailed comments to both ADEV and ACR
 
 Usage:
     python JiraConfluenceAIAgent_mcp.py --issue ADEV-42
@@ -41,28 +44,20 @@ CONFLUENCE_DOC_PAGE = os.environ.get("CONFLUENCE_DOC_PAGE_ID", "")
 CONFLUENCE_TS_PAGE  = os.environ.get("CONFLUENCE_TROUBLESHOOT_PAGE_ID", "")
 APP_GITHUB_OWNER    = os.environ.get("APP_GITHUB_OWNER", "ashishPropt")
 APP_GITHUB_REPO     = os.environ.get("APP_GITHUB_REPO", "ardouraAI")
+APP_GITHUB_BRANCH   = os.environ.get("APP_GITHUB_BRANCH", "main")
 OPERATOR_ACCOUNT_ID = os.environ.get("JIRA_ASSIGNEE_ACCOUNT_ID", "")
 
-# Directory where MCP server scripts live
 BASE_DIR = str(Path(__file__).parent)
-
-# Pass the FULL current environment to MCP subprocesses so they inherit
-# all secrets already loaded from .env by the consumer
 FULL_ENV = {**os.environ}
 
 
 def _server(script: str) -> StdioServerParameters:
-    """Build MCP server params passing the full environment."""
     return StdioServerParameters(
-        command="python",
-        args=[script],
-        cwd=BASE_DIR,
-        env=FULL_ENV,
+        command="python", args=[script], cwd=BASE_DIR, env=FULL_ENV
     )
 
 
 async def call_tool(session: ClientSession, tool: str, args: dict) -> str:
-    """Call an MCP tool and return its text result with error logging."""
     result = await session.call_tool(tool, args)
     if not result.content:
         print(f"[Agent] WARNING: tool '{tool}' returned empty content", flush=True)
@@ -82,8 +77,7 @@ async def run_agent(issue_key: str) -> None:
           flush=True)
 
     if not ATLASSIAN_BASE or not ATLASSIAN_EMAIL or not ATLASSIAN_API_TOKEN:
-        print("[Agent] ERROR: Atlassian credentials missing - check /etc/ardoura/secrets.env",
-              flush=True)
+        print("[Agent] ERROR: Atlassian credentials missing", flush=True)
         sys.exit(1)
 
     claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -96,7 +90,6 @@ async def run_agent(issue_key: str) -> None:
                 await jira.initialize()
                 issue_raw = await call_tool(jira, "jira_get_issue",
                                             {"issue_key": issue_key})
-        print(f"[Agent] Raw issue response: {issue_raw[:200]}", flush=True)
         issue = json.loads(issue_raw)
     except Exception as e:
         print(f"[Agent] ERROR fetching issue: {e}", flush=True)
@@ -126,27 +119,32 @@ async def run_agent(issue_key: str) -> None:
     else:
         confluence_context = "(No Confluence pages configured)"
 
-    # ── Step 3: Read GitHub codebase tree ────────────────────────────────────
-    print("[Agent] Reading GitHub codebase ...", flush=True)
-    github_context = ""
+    # ── Step 3: Read GitHub repo tree ───────────────────────────────────────
+    print("[Agent] Reading GitHub repo tree ...", flush=True)
+    repo_tree = []
     try:
         async with stdio_client(_server("mcp_github_server.py")) as (r, w):
             async with ClientSession(r, w) as gh:
                 await gh.initialize()
-                tree = await call_tool(gh, "get_repo_tree",
-                                        {"owner": APP_GITHUB_OWNER,
-                                         "repo":  APP_GITHUB_REPO})
-                github_context = f"Repository file tree:\n{tree[:4000]}"
+                tree_raw = await call_tool(gh, "github_get_repo_tree", {
+                    "owner":  APP_GITHUB_OWNER,
+                    "repo":   APP_GITHUB_REPO,
+                    "branch": APP_GITHUB_BRANCH,
+                })
+                repo_tree = json.loads(tree_raw)
     except Exception as e:
-        print(f"[Agent] WARNING: GitHub read failed: {e}", flush=True)
-        github_context = f"(GitHub read failed: {e})"
+        print(f"[Agent] WARNING: GitHub tree read failed: {e}", flush=True)
 
-    # ── Step 4: Claude analysis ──────────────────────────────────────────────
-    print("[Agent] Sending to Claude for analysis ...", flush=True)
+    github_context = f"Repository: {APP_GITHUB_OWNER}/{APP_GITHUB_REPO}\n"
+    github_context += f"Files:\n" + "\n".join(repo_tree[:200])
+
+    # ── Step 4: Claude analysis + code generation ───────────────────────────
+    print("[Agent] Sending to Claude for analysis + code generation ...", flush=True)
 
     prompt = f"""You are an expert software engineer and change manager.
 
-You have been given a new Jira issue that needs to be analysed, planned, and actioned.
+You have been given a new Jira issue. Analyse it, plan the fix, and if the change
+is low risk, generate the exact code changes needed.
 
 ## ADEV Issue
 Key: {issue.get('key')}
@@ -159,36 +157,50 @@ Type: {issue.get('issuetype')}
 ## Confluence Documentation
 {confluence_context}
 
-## GitHub Codebase
+## GitHub Repository
 {github_context}
 
 ## Your Task
-Analyse this issue thoroughly and produce a structured JSON response with these exact fields:
+Produce a JSON response with these exact fields:
 
 {{
   "acr_summary": "One-line summary for the ACR ticket (max 100 chars)",
-  "acr_description": "Full detailed description of what will be done to fix/implement this. Include: root cause analysis, files to change, steps to execute, risks, rollback plan.",
+  "acr_description": "Full description: root cause, files to change, steps, risks, rollback plan",
   "execution_safe": true or false,
   "execution_rationale": "Why it is or isn't safe to auto-execute",
   "risk_level": "LOW | MEDIUM | HIGH",
-  "estimated_effort": "e.g. 2 hours, 1 day",
-  "steps": ["step 1", "step 2", ...]
+  "estimated_effort": "e.g. 30 mins, 2 hours",
+  "steps": ["step 1", "step 2", ...],
+  "code_changes": [
+    {{
+      "file_path": "relative/path/to/file.ext",
+      "description": "what change to make in this file",
+      "search": "exact string to find and replace (must be unique in the file)",
+      "replace": "exact string to replace it with"
+    }}
+  ]
 }}
 
-Set execution_safe=true ONLY if ALL of these are true:
-- Risk level is LOW
+Rules for execution_safe=true (ALL must be true):
+- risk_level is LOW
 - No database schema changes
-- No destructive operations
+- No destructive operations  
 - No external service configuration changes
-- Change is fully reversible
+- Change is fully reversible via a revert commit
+- code_changes list is non-empty with specific search/replace pairs
 
-Otherwise set execution_safe=false and leave it for human review.
+For code_changes:
+- Only include if execution_safe=true
+- search must be a unique string that exists in the file
+- replace is the exact new content
+- File paths must match exactly what is in the GitHub file tree above
+- If you cannot identify the exact file or string to change, set execution_safe=false
 
-Respond with ONLY the JSON object, no markdown, no explanation."""
+Respond with ONLY the JSON object, no markdown fences, no explanation."""
 
     response = claude.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=2000,
+        model="claude-sonnet-4-5",
+        max_tokens=3000,
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -199,7 +211,8 @@ Respond with ONLY the JSON object, no markdown, no explanation."""
     try:
         analysis = json.loads(raw)
     except json.JSONDecodeError:
-        print(f"[Agent] WARNING: Claude response not valid JSON:\n{raw}", flush=True)
+        print(f"[Agent] WARNING: Claude response not valid JSON:\n{raw[:300]}",
+              flush=True)
         analysis = {
             "acr_summary":         f"Fix for {issue_key}: {issue.get('summary', '')[:60]}",
             "acr_description":     raw,
@@ -208,28 +221,107 @@ Respond with ONLY the JSON object, no markdown, no explanation."""
             "risk_level":          "HIGH",
             "estimated_effort":    "Unknown",
             "steps":               ["Manual review required"],
+            "code_changes":        [],
         }
 
     print(f"[Agent] Analysis: Risk={analysis.get('risk_level')} "
-          f"Safe={analysis.get('execution_safe')}", flush=True)
+          f"Safe={analysis.get('execution_safe')} "
+          f"Changes={len(analysis.get('code_changes', []))}",
+          flush=True)
 
-    # ── Step 5: Create ACR + link + comments ─────────────────────────────────
+    # ── Step 5: Execute code changes if safe ─────────────────────────────────
+    execution_log = []
+    code_changes  = analysis.get("code_changes", [])
+    auto_exec     = analysis.get("execution_safe", False) and bool(code_changes)
+
+    if auto_exec:
+        print(f"[Agent] Executing {len(code_changes)} code change(s) on GitHub ...",
+              flush=True)
+        try:
+            async with stdio_client(_server("mcp_github_server.py")) as (r, w):
+                async with ClientSession(r, w) as gh:
+                    await gh.initialize()
+                    for change in code_changes:
+                        file_path   = change["file_path"]
+                        search_str  = change["search"]
+                        replace_str = change["replace"]
+                        description = change.get("description", "")
+
+                        print(f"[Agent] Reading {file_path} ...", flush=True)
+                        file_raw = await call_tool(gh, "github_get_file", {
+                            "owner": APP_GITHUB_OWNER,
+                            "repo":  APP_GITHUB_REPO,
+                            "path":  file_path,
+                        })
+                        file_data    = json.loads(file_raw)
+                        old_content  = file_data["content"]
+
+                        if search_str not in old_content:
+                            msg = (f"SKIPPED {file_path}: search string not found. "
+                                   f"Marking for manual review.")
+                            print(f"[Agent] WARNING: {msg}", flush=True)
+                            execution_log.append(msg)
+                            auto_exec = False
+                            continue
+
+                        new_content = old_content.replace(search_str, replace_str, 1)
+                        commit_msg  = (
+                            f"fix({issue_key}): {description or analysis.get('acr_summary', '')}\n\n"
+                            f"Auto-executed by ArdouraAI agent\n"
+                            f"ADEV: {issue_key}\n"
+                            f"ACR:  (created in next step)"
+                        )
+
+                        print(f"[Agent] Committing {file_path} ...", flush=True)
+                        commit_raw = await call_tool(gh, "github_commit_file", {
+                            "owner":          APP_GITHUB_OWNER,
+                            "repo":           APP_GITHUB_REPO,
+                            "path":           file_path,
+                            "content":        new_content,
+                            "commit_message": commit_msg,
+                            "branch":         APP_GITHUB_BRANCH,
+                        })
+                        commit_data = json.loads(commit_raw)
+                        sha = commit_data.get("commit_sha", "")[:10]
+                        msg = f"Committed {file_path} -> {sha}"
+                        print(f"[Agent] {msg}", flush=True)
+                        execution_log.append(msg)
+
+        except Exception as e:
+            print(f"[Agent] ERROR during code execution: {e}", flush=True)
+            execution_log.append(f"Execution failed: {e}")
+            auto_exec = False
+    else:
+        if analysis.get("execution_safe") and not code_changes:
+            print("[Agent] Marked safe but no code_changes provided - leaving for manual review",
+                  flush=True)
+            analysis["execution_safe"] = False
+            analysis["execution_rationale"] += " (No code changes generated)"
+
+    # ── Step 6: Create ACR + link + comments ────────────────────────────────
     print(f"[Agent] Creating ACR in {JIRA_ACTION_PROJECT} ...", flush=True)
 
     steps_text = "\n".join(
         f"{i+1}. {s}" for i, s in enumerate(analysis.get("steps", []))
     )
+    exec_log_text = "\n".join(execution_log) if execution_log else "(no changes executed)"
+    changes_text  = "\n".join(
+        f"- {c.get('file_path')}: {c.get('description')}"
+        for c in code_changes
+    ) if code_changes else "(none)"
 
     acr_description = (
         f"AUTO-GENERATED by ArdouraAI Agent\n\n"
-        f"Linked ADEV issue: {issue_key}\n"
+        f"Linked ADEV: {issue_key}\n"
         f"Original summary: {issue.get('summary')}\n\n"
         f"--- ANALYSIS ---\n{analysis.get('acr_description', '')}\n\n"
-        f"--- EXECUTION STEPS ---\n{steps_text}\n\n"
+        f"--- CODE CHANGES ---\n{changes_text}\n\n"
+        f"--- EXECUTION LOG ---\n{exec_log_text}\n\n"
+        f"--- STEPS ---\n{steps_text}\n\n"
         f"--- RISK ASSESSMENT ---\n"
         f"Risk Level: {analysis.get('risk_level')}\n"
         f"Estimated Effort: {analysis.get('estimated_effort')}\n"
-        f"Auto-Execution Safe: {analysis.get('execution_safe')}\n"
+        f"Auto-Executed: {auto_exec}\n"
         f"Rationale: {analysis.get('execution_rationale')}\n"
     )
 
@@ -237,7 +329,7 @@ Respond with ONLY the JSON object, no markdown, no explanation."""
         async with ClientSession(r, w) as jira:
             await jira.initialize()
 
-            # Create ACR ticket
+            # Create ACR
             acr_raw = await call_tool(jira, "jira_create_ticket", {
                 "project_key": JIRA_ACTION_PROJECT,
                 "summary":     analysis.get("acr_summary",
@@ -246,30 +338,30 @@ Respond with ONLY the JSON object, no markdown, no explanation."""
                 "issue_type":  "Task",
                 "priority":    "High" if analysis.get("risk_level") == "HIGH" else "Medium",
                 "labels":      ["auto-generated", "ardoura-ai",
-                                f"risk-{analysis.get('risk_level', 'unknown').lower()}"],
+                                f"risk-{analysis.get('risk_level', 'unknown').lower()}",
+                                "executed" if auto_exec else "needs-review"],
             })
-            acr = json.loads(acr_raw)
+            acr     = json.loads(acr_raw)
             acr_key = acr["key"]
             print(f"[Agent] ACR created: {acr_key}", flush=True)
 
             # Link ACR -> ADEV
-            link_result = await call_tool(jira, "jira_link_issues", {
+            await call_tool(jira, "jira_link_issues", {
                 "link_type":   "Fixes",
                 "inward_key":  acr_key,
                 "outward_key": issue_key,
             })
-            print(f"[Agent] Linked {acr_key} -> {issue_key}: {link_result}", flush=True)
+            print(f"[Agent] Linked {acr_key} -> {issue_key}", flush=True)
 
             # Comment on ADEV
-            auto_exec = analysis.get("execution_safe")
             adev_comment = (
-                f"ArdouraAI has analysed this issue and created ACR ticket *{acr_key}*.\n\n"
+                f"ArdouraAI has analysed this issue and created ACR *{acr_key}*.\n\n"
                 f"*Risk Level:* {analysis.get('risk_level')}\n"
                 f"*Estimated Effort:* {analysis.get('estimated_effort')}\n"
-                f"*Auto-Execution:* "
-                f"{'Yes - ticket transitioned to In Progress' if auto_exec else 'No - assigned for manual review'}\n"
+                f"*Auto-Executed:* {'Yes - code committed to GitHub' if auto_exec else 'No - assigned for manual review'}\n"
                 f"*Rationale:* {analysis.get('execution_rationale')}\n\n"
-                f"View ACR: {ATLASSIAN_BASE}/browse/{acr_key}"
+                + (f"*Commits:*\n{exec_log_text}\n\n" if auto_exec else "")
+                + f"View ACR: {ATLASSIAN_BASE}/browse/{acr_key}"
             )
             await call_tool(jira, "jira_add_comment", {
                 "issue_key": issue_key,
@@ -283,41 +375,46 @@ Respond with ONLY the JSON object, no markdown, no explanation."""
                     "issue_key":  acr_key,
                     "account_id": OPERATOR_ACCOUNT_ID,
                 })
-                print(f"[Agent] ACR assigned to {OPERATOR_ACCOUNT_ID}", flush=True)
+                print(f"[Agent] ACR assigned to operator", flush=True)
 
-            # Transition or leave open
             if auto_exec:
-                print(f"[Agent] Safe to execute - transitioning {acr_key} to In Progress",
-                      flush=True)
+                # Transition to In Progress then Done
+                print(f"[Agent] Transitioning {acr_key} to In Progress ...", flush=True)
                 await call_tool(jira, "jira_transition_issue", {
                     "issue_key":       acr_key,
                     "transition_name": "In Progress",
                 })
+                print(f"[Agent] Transitioning {acr_key} to Done ...", flush=True)
+                await call_tool(jira, "jira_transition_issue", {
+                    "issue_key":       acr_key,
+                    "transition_name": "Done",
+                })
                 await call_tool(jira, "jira_add_comment", {
                     "issue_key": acr_key,
                     "comment":   (
-                        f"ArdouraAI auto-executing this change (risk: LOW).\n\n"
-                        f"Steps being executed:\n{steps_text}\n\n"
+                        f"ArdouraAI auto-executed this change.\n\n"
+                        f"*Commits:*\n{exec_log_text}\n\n"
+                        f"*Files changed:*\n{changes_text}\n\n"
                         f"Original issue: {ATLASSIAN_BASE}/browse/{issue_key}"
                     ),
                 })
             else:
-                print(f"[Agent] NOT safe - leaving {acr_key} open for manual review",
-                      flush=True)
                 await call_tool(jira, "jira_add_comment", {
                     "issue_key": acr_key,
                     "comment":   (
-                        f"ArdouraAI has flagged this for manual review.\n\n"
-                        f"Reason: {analysis.get('execution_rationale')}\n"
-                        f"Risk Level: {analysis.get('risk_level')}\n\n"
-                        f"Please review the execution steps and transition to "
-                        f"In Progress when ready.\n\n"
+                        f"ArdouraAI flagged this for manual review.\n\n"
+                        f"*Reason:* {analysis.get('execution_rationale')}\n"
+                        f"*Risk Level:* {analysis.get('risk_level')}\n\n"
+                        + (f"*Execution errors:*\n{exec_log_text}\n\n"
+                           if execution_log else "")
+                        + f"Please review and transition to In Progress when ready.\n\n"
                         f"Original issue: {ATLASSIAN_BASE}/browse/{issue_key}"
                     ),
                 })
 
-    print(f"[Agent] DONE. ADEV={issue_key} ACR={acr_key} "
-          f"Safe={auto_exec}", flush=True)
+    status = "EXECUTED" if auto_exec else "NEEDS REVIEW"
+    print(f"[Agent] DONE. ADEV={issue_key} ACR={acr_key} Status={status}",
+          flush=True)
 
 
 def main():
