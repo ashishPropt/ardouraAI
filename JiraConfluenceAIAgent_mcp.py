@@ -32,85 +32,114 @@ from mcp.client.stdio import stdio_client
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")
-ATLASSIAN_BASE         = os.environ.get("ATLASSIAN_BASE", "")
-ATLASSIAN_EMAIL        = os.environ.get("ATLASSIAN_EMAIL", "")
-ATLASSIAN_API_TOKEN    = os.environ.get("ATLASSIAN_API_TOKEN", "")
-JIRA_ACTION_PROJECT    = os.environ.get("JIRA_ACTION_PROJECT_KEY", "ACR")
-CONFLUENCE_DOC_PAGE   = os.environ.get("CONFLUENCE_DOC_PAGE_ID", "")
-CONFLUENCE_TS_PAGE    = os.environ.get("CONFLUENCE_TROUBLESHOOT_PAGE_ID", "")
-APP_GITHUB_OWNER       = os.environ.get("APP_GITHUB_OWNER", "ashishPropt")
-APP_GITHUB_REPO        = os.environ.get("APP_GITHUB_REPO", "ardouraAI")
-OPERATOR_ACCOUNT_ID    = os.environ.get("JIRA_ASSIGNEE_ACCOUNT_ID", "")
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+ATLASSIAN_BASE      = os.environ.get("ATLASSIAN_BASE", "")
+ATLASSIAN_EMAIL     = os.environ.get("ATLASSIAN_EMAIL", "")
+ATLASSIAN_API_TOKEN = os.environ.get("ATLASSIAN_API_TOKEN", "")
+JIRA_ACTION_PROJECT = os.environ.get("JIRA_ACTION_PROJECT_KEY", "ACR")
+CONFLUENCE_DOC_PAGE = os.environ.get("CONFLUENCE_DOC_PAGE_ID", "")
+CONFLUENCE_TS_PAGE  = os.environ.get("CONFLUENCE_TROUBLESHOOT_PAGE_ID", "")
+APP_GITHUB_OWNER    = os.environ.get("APP_GITHUB_OWNER", "ashishPropt")
+APP_GITHUB_REPO     = os.environ.get("APP_GITHUB_REPO", "ardouraAI")
+OPERATOR_ACCOUNT_ID = os.environ.get("JIRA_ASSIGNEE_ACCOUNT_ID", "")
 
-# Path to this script's directory (MCP servers live here)
+# Directory where MCP server scripts live
 BASE_DIR = str(Path(__file__).parent)
 
+# Pass the FULL current environment to MCP subprocesses so they inherit
+# all secrets already loaded from .env by the consumer
+FULL_ENV = {**os.environ}
 
-def _server(script: str, extra_env: dict | None = None) -> StdioServerParameters:
-    env = {
-        "ATLASSIAN_BASE":      ATLASSIAN_BASE,
-        "ATLASSIAN_EMAIL":     ATLASSIAN_EMAIL,
-        "ATLASSIAN_API_TOKEN": ATLASSIAN_API_TOKEN,
-        "GITHUB_TOKEN":        os.environ.get("GITHUB_TOKEN", ""),
-        "CONFLUENCE_BASE_URL": os.environ.get("CONFLUENCE_BASE_URL", ""),
-        **(extra_env or {}),
-    }
-    return StdioServerParameters(command="python", args=[script], cwd=BASE_DIR, env=env)
+
+def _server(script: str) -> StdioServerParameters:
+    """Build MCP server params passing the full environment."""
+    return StdioServerParameters(
+        command="python",
+        args=[script],
+        cwd=BASE_DIR,
+        env=FULL_ENV,
+    )
 
 
 async def call_tool(session: ClientSession, tool: str, args: dict) -> str:
-    """Call an MCP tool and return its text result."""
+    """Call an MCP tool and return its text result with error logging."""
     result = await session.call_tool(tool, args)
-    return result.content[0].text if result.content else "{}"
+    if not result.content:
+        print(f"[Agent] WARNING: tool '{tool}' returned empty content", flush=True)
+        return "{}"
+    text = result.content[0].text
+    if not text or not text.strip():
+        print(f"[Agent] WARNING: tool '{tool}' returned blank text", flush=True)
+        return "{}"
+    return text
 
 
 async def run_agent(issue_key: str) -> None:
     print(f"[Agent] Starting for {issue_key}", flush=True)
+    print(f"[Agent] ATLASSIAN_BASE={ATLASSIAN_BASE}", flush=True)
+    print(f"[Agent] ATLASSIAN_EMAIL={ATLASSIAN_EMAIL}", flush=True)
+    print(f"[Agent] TOKEN set={'yes' if ATLASSIAN_API_TOKEN else 'NO - MISSING'}",
+          flush=True)
+
+    if not ATLASSIAN_BASE or not ATLASSIAN_EMAIL or not ATLASSIAN_API_TOKEN:
+        print("[Agent] ERROR: Atlassian credentials missing - check /etc/ardoura/secrets.env",
+              flush=True)
+        sys.exit(1)
 
     claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     # ── Step 1: Read the ADEV issue ──────────────────────────────────────────
     print(f"[Agent] Fetching {issue_key} from Jira ...", flush=True)
-    async with stdio_client(_server("mcp_jira_server.py")) as (r, w):
-        async with ClientSession(r, w) as jira:
-            await jira.initialize()
-            issue_raw = await call_tool(jira, "jira_get_issue", {"issue_key": issue_key})
+    try:
+        async with stdio_client(_server("mcp_jira_server.py")) as (r, w):
+            async with ClientSession(r, w) as jira:
+                await jira.initialize()
+                issue_raw = await call_tool(jira, "jira_get_issue",
+                                            {"issue_key": issue_key})
+        print(f"[Agent] Raw issue response: {issue_raw[:200]}", flush=True)
+        issue = json.loads(issue_raw)
+    except Exception as e:
+        print(f"[Agent] ERROR fetching issue: {e}", flush=True)
+        raise
 
-    issue = json.loads(issue_raw)
     print(f"[Agent] Issue: {issue.get('summary')}", flush=True)
 
     # ── Step 2: Read Confluence docs ─────────────────────────────────────────
     confluence_context = ""
     if CONFLUENCE_DOC_PAGE or CONFLUENCE_TS_PAGE:
         print("[Agent] Reading Confluence docs ...", flush=True)
-        async with stdio_client(_server("mcp_confluence_server.py")) as (r, w):
-            async with ClientSession(r, w) as conf:
-                await conf.initialize()
-                if CONFLUENCE_DOC_PAGE:
-                    doc = await call_tool(conf, "confluence_get_page",
-                                          {"page_id": CONFLUENCE_DOC_PAGE})
-                    confluence_context += f"\n\n=== Documentation ===\n{doc[:3000]}"
-                if CONFLUENCE_TS_PAGE:
-                    ts = await call_tool(conf, "confluence_get_page",
-                                         {"page_id": CONFLUENCE_TS_PAGE})
-                    confluence_context += f"\n\n=== Troubleshooting ===\n{ts[:3000]}"
+        try:
+            async with stdio_client(_server("mcp_confluence_server.py")) as (r, w):
+                async with ClientSession(r, w) as conf:
+                    await conf.initialize()
+                    if CONFLUENCE_DOC_PAGE:
+                        doc = await call_tool(conf, "confluence_get_page",
+                                              {"page_id": CONFLUENCE_DOC_PAGE})
+                        confluence_context += f"\n\n=== Documentation ===\n{doc[:3000]}"
+                    if CONFLUENCE_TS_PAGE:
+                        ts = await call_tool(conf, "confluence_get_page",
+                                             {"page_id": CONFLUENCE_TS_PAGE})
+                        confluence_context += f"\n\n=== Troubleshooting ===\n{ts[:3000]}"
+        except Exception as e:
+            print(f"[Agent] WARNING: Confluence read failed: {e}", flush=True)
+            confluence_context = f"(Confluence read failed: {e})"
     else:
         confluence_context = "(No Confluence pages configured)"
 
     # ── Step 3: Read GitHub codebase tree ────────────────────────────────────
     print("[Agent] Reading GitHub codebase ...", flush=True)
     github_context = ""
-    async with stdio_client(_server("mcp_github_server.py")) as (r, w):
-        async with ClientSession(r, w) as gh:
-            await gh.initialize()
-            try:
+    try:
+        async with stdio_client(_server("mcp_github_server.py")) as (r, w):
+            async with ClientSession(r, w) as gh:
+                await gh.initialize()
                 tree = await call_tool(gh, "get_repo_tree",
                                         {"owner": APP_GITHUB_OWNER,
                                          "repo":  APP_GITHUB_REPO})
                 github_context = f"Repository file tree:\n{tree[:4000]}"
-            except Exception as e:
-                github_context = f"(GitHub read failed: {e})"
+    except Exception as e:
+        print(f"[Agent] WARNING: GitHub read failed: {e}", flush=True)
+        github_context = f"(GitHub read failed: {e})"
 
     # ── Step 4: Claude analysis ──────────────────────────────────────────────
     print("[Agent] Sending to Claude for analysis ...", flush=True)
@@ -164,51 +193,45 @@ Respond with ONLY the JSON object, no markdown, no explanation."""
     )
 
     raw = response.content[0].text.strip()
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
     try:
         analysis = json.loads(raw)
     except json.JSONDecodeError:
-        print(f"[Agent] WARNING: Claude response was not valid JSON:\n{raw}", flush=True)
+        print(f"[Agent] WARNING: Claude response not valid JSON:\n{raw}", flush=True)
         analysis = {
-            "acr_summary":          f"Fix for {issue_key}: {issue.get('summary', '')[:60]}",
-            "acr_description":      raw,
-            "execution_safe":        False,
-            "execution_rationale":  "Could not parse Claude response - manual review required",
-            "risk_level":           "HIGH",
-            "estimated_effort":     "Unknown",
-            "steps":                ["Manual review required"]
+            "acr_summary":         f"Fix for {issue_key}: {issue.get('summary', '')[:60]}",
+            "acr_description":     raw,
+            "execution_safe":      False,
+            "execution_rationale": "Could not parse Claude response - manual review required",
+            "risk_level":          "HIGH",
+            "estimated_effort":    "Unknown",
+            "steps":               ["Manual review required"],
         }
 
-    print(f"[Agent] Analysis complete. Risk={analysis.get('risk_level')} "
+    print(f"[Agent] Analysis: Risk={analysis.get('risk_level')} "
           f"Safe={analysis.get('execution_safe')}", flush=True)
 
-    # ── Step 5: Create ACR ticket + link + comment ───────────────────────────
-    print(f"[Agent] Creating ACR ticket in {JIRA_ACTION_PROJECT} ...", flush=True)
+    # ── Step 5: Create ACR + link + comments ─────────────────────────────────
+    print(f"[Agent] Creating ACR in {JIRA_ACTION_PROJECT} ...", flush=True)
 
     steps_text = "\n".join(
         f"{i+1}. {s}" for i, s in enumerate(analysis.get("steps", []))
     )
 
-    acr_description = f"""AUTO-GENERATED by ArdouraAI Agent
-
-Linked ADEV issue: {issue_key}
-Original summary: {issue.get('summary')}
-
---- ANALYSIS ---
-{analysis.get('acr_description', '')}
-
---- EXECUTION STEPS ---
-{steps_text}
-
---- RISK ASSESSMENT ---
-Risk Level: {analysis.get('risk_level')}
-Estimated Effort: {analysis.get('estimated_effort')}
-Auto-Execution Safe: {analysis.get('execution_safe')}
-Rationale: {analysis.get('execution_rationale')}
-"""
+    acr_description = (
+        f"AUTO-GENERATED by ArdouraAI Agent\n\n"
+        f"Linked ADEV issue: {issue_key}\n"
+        f"Original summary: {issue.get('summary')}\n\n"
+        f"--- ANALYSIS ---\n{analysis.get('acr_description', '')}\n\n"
+        f"--- EXECUTION STEPS ---\n{steps_text}\n\n"
+        f"--- RISK ASSESSMENT ---\n"
+        f"Risk Level: {analysis.get('risk_level')}\n"
+        f"Estimated Effort: {analysis.get('estimated_effort')}\n"
+        f"Auto-Execution Safe: {analysis.get('execution_safe')}\n"
+        f"Rationale: {analysis.get('execution_rationale')}\n"
+    )
 
     async with stdio_client(_server("mcp_jira_server.py")) as (r, w):
         async with ClientSession(r, w) as jira:
@@ -218,36 +241,36 @@ Rationale: {analysis.get('execution_rationale')}
             acr_raw = await call_tool(jira, "jira_create_ticket", {
                 "project_key": JIRA_ACTION_PROJECT,
                 "summary":     analysis.get("acr_summary",
-                                f"ACR: {issue.get('summary', '')[:80]}"),
+                               f"ACR: {issue.get('summary', '')[:80]}"),
                 "description": acr_description,
                 "issue_type":  "Task",
                 "priority":    "High" if analysis.get("risk_level") == "HIGH" else "Medium",
                 "labels":      ["auto-generated", "ardoura-ai",
-                                f"risk-{analysis.get('risk_level','unknown').lower()}"],
+                                f"risk-{analysis.get('risk_level', 'unknown').lower()}"],
             })
             acr = json.loads(acr_raw)
             acr_key = acr["key"]
-            print(f"[Agent] ACR ticket created: {acr_key}", flush=True)
+            print(f"[Agent] ACR created: {acr_key}", flush=True)
 
-            # Link ACR -> ADEV as 'fixes'
-            await call_tool(jira, "jira_link_issues", {
-                "link_type":    "Fixes",
-                "inward_key":   acr_key,
-                "outward_key":  issue_key,
+            # Link ACR -> ADEV
+            link_result = await call_tool(jira, "jira_link_issues", {
+                "link_type":   "Fixes",
+                "inward_key":  acr_key,
+                "outward_key": issue_key,
             })
-            print(f"[Agent] Linked {acr_key} -> {issue_key} (Fixes)", flush=True)
+            print(f"[Agent] Linked {acr_key} -> {issue_key}: {link_result}", flush=True)
 
-            # Add comment to ADEV
-            adev_comment = f"""ArdouraAI has analysed this issue and created ACR ticket *{acr_key}*.
-
-*Risk Level:* {analysis.get('risk_level')}
-*Estimated Effort:* {analysis.get('estimated_effort')}
-*Auto-Execution:* {'Yes - ticket transitioned to In Progress' if analysis.get('execution_safe') else 'No - assigned for manual review'}
-
-*Rationale:* {analysis.get('execution_rationale')}
-
-[View ACR ticket|{ATLASSIAN_BASE}/browse/{acr_key}]"""
-
+            # Comment on ADEV
+            auto_exec = analysis.get("execution_safe")
+            adev_comment = (
+                f"ArdouraAI has analysed this issue and created ACR ticket *{acr_key}*.\n\n"
+                f"*Risk Level:* {analysis.get('risk_level')}\n"
+                f"*Estimated Effort:* {analysis.get('estimated_effort')}\n"
+                f"*Auto-Execution:* "
+                f"{'Yes - ticket transitioned to In Progress' if auto_exec else 'No - assigned for manual review'}\n"
+                f"*Rationale:* {analysis.get('execution_rationale')}\n\n"
+                f"View ACR: {ATLASSIAN_BASE}/browse/{acr_key}"
+            )
             await call_tool(jira, "jira_add_comment", {
                 "issue_key": issue_key,
                 "comment":   adev_comment,
@@ -260,48 +283,46 @@ Rationale: {analysis.get('execution_rationale')}
                     "issue_key":  acr_key,
                     "account_id": OPERATOR_ACCOUNT_ID,
                 })
-                print(f"[Agent] ACR assigned to operator", flush=True)
+                print(f"[Agent] ACR assigned to {OPERATOR_ACCOUNT_ID}", flush=True)
 
-            # Transition ACR based on safety
-            if analysis.get("execution_safe"):
-                print(f"[Agent] Execution safe - transitioning {acr_key} to In Progress",
+            # Transition or leave open
+            if auto_exec:
+                print(f"[Agent] Safe to execute - transitioning {acr_key} to In Progress",
                       flush=True)
                 await call_tool(jira, "jira_transition_issue", {
                     "issue_key":       acr_key,
                     "transition_name": "In Progress",
                 })
-
                 await call_tool(jira, "jira_add_comment", {
                     "issue_key": acr_key,
-                    "comment":   f"""ArdouraAI auto-executing this change (risk: LOW).
-
-*Steps being executed:*
-{steps_text}
-
-Original issue: [{issue_key}|{ATLASSIAN_BASE}/browse/{issue_key}]""",
+                    "comment":   (
+                        f"ArdouraAI auto-executing this change (risk: LOW).\n\n"
+                        f"Steps being executed:\n{steps_text}\n\n"
+                        f"Original issue: {ATLASSIAN_BASE}/browse/{issue_key}"
+                    ),
                 })
             else:
-                print(f"[Agent] Execution NOT safe - leaving {acr_key} open for review",
+                print(f"[Agent] NOT safe - leaving {acr_key} open for manual review",
                       flush=True)
                 await call_tool(jira, "jira_add_comment", {
                     "issue_key": acr_key,
-                    "comment":   f"""ArdouraAI has flagged this for manual review.
-
-*Reason:* {analysis.get('execution_rationale')}
-*Risk Level:* {analysis.get('risk_level')}
-
-Please review the execution steps and transition to In Progress when ready.
-
-Original issue: [{issue_key}|{ATLASSIAN_BASE}/browse/{issue_key}]""",
+                    "comment":   (
+                        f"ArdouraAI has flagged this for manual review.\n\n"
+                        f"Reason: {analysis.get('execution_rationale')}\n"
+                        f"Risk Level: {analysis.get('risk_level')}\n\n"
+                        f"Please review the execution steps and transition to "
+                        f"In Progress when ready.\n\n"
+                        f"Original issue: {ATLASSIAN_BASE}/browse/{issue_key}"
+                    ),
                 })
 
-    print(f"[Agent] Done. ADEV={issue_key} ACR={acr_key} "
-          f"Safe={analysis.get('execution_safe')}", flush=True)
+    print(f"[Agent] DONE. ADEV={issue_key} ACR={acr_key} "
+          f"Safe={auto_exec}", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description="ArdouraAI Jira Agent")
-    parser.add_argument("--issue", required=True, help="ADEV issue key e.g. ADEV-42")
+    parser.add_argument("--issue", required=True, help="e.g. ADEV-42")
     args = parser.parse_args()
     asyncio.run(run_agent(args.issue))
 
