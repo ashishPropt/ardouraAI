@@ -1,26 +1,39 @@
 # =============================================================================
 # ArdouraAI - Docker Compose  (Vultr deployment)
 #
-# Services:
-#   zookeeper       - Kafka coordination
-#   kafka           - Message broker
-#   kafka-init      - One-shot topic creator
-#   flask-producer  - Webhook receiver + Kafka producer  (port 5000)
-#   jira-consumer   - AI triage agent for Jira tickets
-#   obs-consumer    - Observability alert consumer
-#
-# NOTE: MCP servers use stdio transport and are NOT persistent Docker
-#       services. JiraConfluenceAIAgent_mcp.py spawns them on demand
-#       via mcp_config.json. All scripts share /app = /opt/ardoura.
-#
-# Secrets: /opt/ardoura/.env  (written by startup.sh)
+# Dependencies are pre-installed into a shared pip-cache volume on first
+# run, so containers start instantly on restart without re-running pip.
 # =============================================================================
 
 x-common-env: &common-env
   env_file:
     - /opt/ardoura/.env
 
+x-pip-cache: &pip-cache
+  - pip-packages:/usr/local/lib/python3.11/site-packages
+  - pip-bin:/usr/local/bin
+
 services:
+
+  # -- Dependency installer (runs once then exits) ----------------------------
+  # Installs all Python deps into a shared volume so other containers
+  # can start immediately without running pip themselves.
+  pip-installer:
+    image: python:3.11-slim
+    container_name: pip-installer
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+      - pip-packages:/usr/local/lib/python3.11/site-packages
+      - pip-bin:/usr/local/bin
+    command: >-
+      bash -c "
+        echo '[pip-installer] Installing dependencies...' &&
+        pip install --quiet flask kafka-python python-dotenv &&
+        pip install --quiet -r requirements.txt &&
+        echo '[pip-installer] Done!'
+      "
+    restart: on-failure
 
   # -- Zookeeper --------------------------------------------------------------
   zookeeper:
@@ -96,25 +109,25 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
+      - pip-packages:/usr/local/lib/python3.11/site-packages
+      - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    command: >-
-      bash -c "
-        pip install --quiet flask kafka-python python-dotenv &&
-        python kafka_jira_producer.py
-      "
+    command: python kafka_jira_producer.py
     ports:
       - "5000:5000"
     depends_on:
       kafka:
         condition: service_healthy
+      pip-installer:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:5000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 45s
+      start_period: 15s
 
   # -- Jira AI consumer -------------------------------------------------------
   jira-consumer:
@@ -124,18 +137,18 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
+      - pip-packages:/usr/local/lib/python3.11/site-packages
+      - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    command: >-
-      bash -c "
-        pip install --quiet -r requirements.txt kafka-python &&
-        python kafka_jira_consumer.py
-      "
+    command: python kafka_jira_consumer.py
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
+        condition: service_completed_successfully
+      pip-installer:
         condition: service_completed_successfully
 
   # -- Observability consumer -------------------------------------------------
@@ -146,21 +159,23 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
+      - pip-packages:/usr/local/lib/python3.11/site-packages
+      - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    command: >-
-      bash -c "
-        pip install --quiet -r requirements.txt kafka-python &&
-        python kafka_observability_consumer.py
-      "
+    command: python kafka_observability_consumer.py
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
+        condition: service_completed_successfully
+      pip-installer:
         condition: service_completed_successfully
 
 volumes:
   zk-data:
   zk-log:
   kafka-data:
+  pip-packages:
+  pip-bin:
