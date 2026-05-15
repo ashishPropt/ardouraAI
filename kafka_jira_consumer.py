@@ -1,28 +1,29 @@
+import os, json, subprocess, sys
+from pathlib import Path
 from kafka import KafkaConsumer
-import json
-import subprocess
-import sys
-import os
+from dotenv import load_dotenv
 
-# Only process issues from this project (defence-in-depth — producer already filters)
-TARGET_PROJECT_KEY   = "ADEV"
-TARGET_WEBHOOK_EVENT = "jira:issue_created"
+load_dotenv()
 
-# Path to the MCP AI agent script — resolved relative to this file's location
-AGENT_SCRIPT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "JiraConfluenceAIAgent_mcp.py"
-)
+# Reads kafka:9092 when running inside Docker Compose,
+# falls back to localhost:9092 for local dev.
+BOOTSTRAP_SERVERS    = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+TARGET_PROJECT_KEY   = os.environ.get("KAFKA_TARGET_PROJECT_KEY", "ADEV")
+TARGET_WEBHOOK_EVENT = os.environ.get("KAFKA_TARGET_WEBHOOK_EVENT", "jira:issue_created")
+GROUP_ID             = os.environ.get("KAFKA_GROUP_ID", "jira-agent-group")
+
+AGENT_SCRIPT = str(Path(__file__).parent / "JiraConfluenceAIAgent_mcp.py")
+
+print(f"[Consumer] Kafka bootstrap: {BOOTSTRAP_SERVERS}")
+print(f"[Consumer] Listening for {TARGET_PROJECT_KEY} issue_created events on 'jira-events' ...")
 
 consumer = KafkaConsumer(
     'jira-events',
-    bootstrap_servers='localhost:9092',
+    bootstrap_servers=BOOTSTRAP_SERVERS,
     value_deserializer=lambda v: json.loads(v.decode('utf-8')),
     auto_offset_reset='earliest',
-    group_id='jira-agent-group'
+    group_id=GROUP_ID
 )
-
-print(f"[Consumer] Listening for {TARGET_PROJECT_KEY} issue_created events on Kafka topic 'jira-events' ...")
 
 for message in consumer:
     event = message.value
@@ -32,32 +33,26 @@ for message in consumer:
     issue_key     = issue.get('key', '')
     project_key   = issue.get('fields', {}).get('project', {}).get('key', '')
 
-    # ── Guard 1: must be an issue_created event ───────────────────────
     if webhook_event != TARGET_WEBHOOK_EVENT:
-        print(f"[Consumer] Skipped – event type '{webhook_event}' is not issue_created")
+        print(f"[Consumer] Skipped -- event type '{webhook_event}' is not issue_created")
         continue
 
-    # ── Guard 2: must be in the ADEV project ──────────────────────────
     if project_key != TARGET_PROJECT_KEY:
-        print(f"[Consumer] Skipped – issue {issue_key} belongs to project '{project_key}', not '{TARGET_PROJECT_KEY}'")
+        print(f"[Consumer] Skipped -- issue {issue_key} belongs to project '{project_key}', not '{TARGET_PROJECT_KEY}'")
         continue
 
     if not issue_key:
-        print("[Consumer] Skipped – could not determine issue key from event payload")
+        print("[Consumer] Skipped -- could not determine issue key from event payload")
         continue
 
-    print(f"[Consumer] New {TARGET_PROJECT_KEY} issue detected: {issue_key} – triggering MCP AI agent ...")
+    print(f"[Consumer] New {TARGET_PROJECT_KEY} issue detected: {issue_key} -- triggering MCP AI agent ...")
 
     result = subprocess.run(
-        [
-            sys.executable,
-            AGENT_SCRIPT,
-            "--issue", issue_key
-        ],
-        capture_output=False   # let agent output flow to console
+        [sys.executable, AGENT_SCRIPT, "--issue", issue_key],
+        capture_output=False
     )
 
     if result.returncode != 0:
-        print(f"[Consumer] WARNING – agent exited with code {result.returncode} for {issue_key}")
+        print(f"[Consumer] WARNING -- agent exited with code {result.returncode} for {issue_key}")
     else:
         print(f"[Consumer] Agent completed successfully for {issue_key}")
