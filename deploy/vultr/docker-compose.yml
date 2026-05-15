@@ -9,17 +9,12 @@
 #   jira-consumer   - AI triage agent for Jira tickets
 #   obs-consumer    - Observability alert consumer
 #
-# NOTE: MCP servers (mcp_jira_server.py, mcp_confluence_server.py,
-#       mcp_github_server.py, mcp_observability_server.py) use stdio
-#       transport and are NOT run as persistent Docker services.
-#       The AI agent (JiraConfluenceAIAgent_mcp.py) spawns them as
-#       subprocesses on demand via mcp_config.json. They share the
-#       same /app filesystem as jira-consumer (/opt/ardoura mounted).
+# NOTE: MCP servers use stdio transport and are NOT persistent Docker
+#       services. JiraConfluenceAIAgent_mcp.py spawns them on demand
+#       via mcp_config.json. All scripts share /app = /opt/ardoura.
 #
-# Secrets are read from /opt/ardoura/.env (written by startup.sh).
+# Secrets: /opt/ardoura/.env  (written by startup.sh)
 # =============================================================================
-
-version: "3.9"
 
 x-common-env: &common-env
   env_file:
@@ -122,9 +117,6 @@ services:
       start_period: 45s
 
   # -- Jira AI consumer -------------------------------------------------------
-  # Runs kafka_jira_consumer.py which spawns JiraConfluenceAIAgent_mcp.py
-  # per event. The agent spawns MCP stdio servers (mcp_jira_server.py etc.)
-  # on demand using mcp_config.json. All scripts live at /app.
   jira-consumer:
     image: python:3.11-slim
     container_name: jira-consumer
