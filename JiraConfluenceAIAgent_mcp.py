@@ -5,8 +5,9 @@ JiraConfluenceAIAgent_mcp.py
 AI agent that:
   1. Reads an ADEV Jira issue
   2. Checks Confluence docs for context
-  3. Reads relevant GitHub files
-  4. Uses Claude to analyse, plan AND generate the actual code fix
+  3. Gets GitHub repo tree -> asks Claude which files are relevant
+     -> reads those files' ACTUAL CONTENTS before generating the fix
+  4. Uses Claude to generate exact search/replace code changes
   5. Creates an ACR ticket linked to the ADEV as 'fixes'
   6. If execution_safe=True (LOW blast radius):
        - Commits the code changes to GitHub
@@ -43,9 +44,12 @@ JIRA_ACTION_PROJECT = os.environ.get("JIRA_ACTION_PROJECT_KEY", "ACR")
 CONFLUENCE_DOC_PAGE = os.environ.get("CONFLUENCE_DOC_PAGE_ID", "")
 CONFLUENCE_TS_PAGE  = os.environ.get("CONFLUENCE_TROUBLESHOOT_PAGE_ID", "")
 APP_GITHUB_OWNER    = os.environ.get("APP_GITHUB_OWNER", "ashishPropt")
-APP_GITHUB_REPO     = os.environ.get("APP_GITHUB_REPO", "ardouraAI")
+APP_GITHUB_REPO     = os.environ.get("APP_GITHUB_REPO", "Princetondawgs")
 APP_GITHUB_BRANCH   = os.environ.get("APP_GITHUB_BRANCH", "main")
 OPERATOR_ACCOUNT_ID = os.environ.get("JIRA_ASSIGNEE_ACCOUNT_ID", "")
+
+# Max chars to include per file so we don't blow the context window
+MAX_FILE_CHARS = 8000
 
 BASE_DIR = str(Path(__file__).parent)
 FULL_ENV = {**os.environ}
@@ -69,10 +73,46 @@ async def call_tool(session: ClientSession, tool: str, args: dict) -> str:
     return text
 
 
+def _ask_claude_which_files(claude: anthropic.Anthropic,
+                             issue: dict, repo_tree: list[str]) -> list[str]:
+    """Ask Claude to identify which files from the tree are relevant to this issue."""
+    tree_text = "\n".join(repo_tree)
+    prompt = f"""You are a senior software engineer.
+
+Given this Jira issue:
+Summary: {issue.get('summary')}
+Description: {issue.get('description', '')}
+
+And this GitHub repository file tree:
+{tree_text}
+
+Identify the files that would need to be READ to understand and fix this issue.
+Return ONLY a JSON array of file paths (max 5 files), e.g.:
+["css/style.css", "includes/header.php"]
+
+Choose the most relevant files. For UI/styling issues pick CSS and template files.
+For logic issues pick PHP/JS files. Respond with ONLY the JSON array."""
+
+    r = claude.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    raw = r.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    try:
+        files = json.loads(raw)
+        # Only return files that actually exist in the tree
+        return [f for f in files if f in repo_tree][:5]
+    except Exception:
+        return []
+
+
 async def run_agent(issue_key: str) -> None:
     print(f"[Agent] Starting for {issue_key}", flush=True)
+    print(f"[Agent] Target repo: {APP_GITHUB_OWNER}/{APP_GITHUB_REPO}", flush=True)
     print(f"[Agent] ATLASSIAN_BASE={ATLASSIAN_BASE}", flush=True)
-    print(f"[Agent] ATLASSIAN_EMAIL={ATLASSIAN_EMAIL}", flush=True)
     print(f"[Agent] TOKEN set={'yes' if ATLASSIAN_API_TOKEN else 'NO - MISSING'}",
           flush=True)
 
@@ -94,7 +134,6 @@ async def run_agent(issue_key: str) -> None:
     except Exception as e:
         print(f"[Agent] ERROR fetching issue: {e}", flush=True)
         raise
-
     print(f"[Agent] Issue: {issue.get('summary')}", flush=True)
 
     # ── Step 2: Read Confluence docs ─────────────────────────────────────────
@@ -119,7 +158,7 @@ async def run_agent(issue_key: str) -> None:
     else:
         confluence_context = "(No Confluence pages configured)"
 
-    # ── Step 3: Read GitHub repo tree ───────────────────────────────────────
+    # ── Step 3a: Get repo tree ──────────────────────────────────────────────────
     print("[Agent] Reading GitHub repo tree ...", flush=True)
     repo_tree = []
     try:
@@ -132,19 +171,65 @@ async def run_agent(issue_key: str) -> None:
                     "branch": APP_GITHUB_BRANCH,
                 })
                 repo_tree = json.loads(tree_raw)
+        print(f"[Agent] Repo tree: {len(repo_tree)} files", flush=True)
     except Exception as e:
         print(f"[Agent] WARNING: GitHub tree read failed: {e}", flush=True)
 
-    github_context = f"Repository: {APP_GITHUB_OWNER}/{APP_GITHUB_REPO}\n"
-    github_context += f"Files:\n" + "\n".join(repo_tree[:200])
+    # ── Step 3b: Ask Claude which files are relevant ──────────────────────────
+    relevant_files = []
+    if repo_tree:
+        print("[Agent] Asking Claude which files to read ...", flush=True)
+        relevant_files = _ask_claude_which_files(claude, issue, repo_tree)
+        print(f"[Agent] Relevant files identified: {relevant_files}", flush=True)
+
+    # ── Step 3c: Read actual file contents ────────────────────────────────────
+    file_contents: dict[str, str] = {}
+    if relevant_files:
+        print(f"[Agent] Reading {len(relevant_files)} file(s) from GitHub ...",
+              flush=True)
+        try:
+            async with stdio_client(_server("mcp_github_server.py")) as (r, w):
+                async with ClientSession(r, w) as gh:
+                    await gh.initialize()
+                    for file_path in relevant_files:
+                        try:
+                            file_raw = await call_tool(gh, "github_get_file", {
+                                "owner": APP_GITHUB_OWNER,
+                                "repo":  APP_GITHUB_REPO,
+                                "path":  file_path,
+                            })
+                            file_data = json.loads(file_raw)
+                            content   = file_data.get("content", "")
+                            file_contents[file_path] = content[:MAX_FILE_CHARS]
+                            print(f"[Agent] Read {file_path} "
+                                  f"({len(content)} chars)", flush=True)
+                        except Exception as fe:
+                            print(f"[Agent] WARNING: could not read {file_path}: {fe}",
+                                  flush=True)
+        except Exception as e:
+            print(f"[Agent] WARNING: GitHub file read failed: {e}", flush=True)
+
+    # Build github context with actual file contents
+    github_context = (
+        f"Repository: {APP_GITHUB_OWNER}/{APP_GITHUB_REPO} "
+        f"(branch: {APP_GITHUB_BRANCH})\n"
+        f"Total files: {len(repo_tree)}\n\n"
+    )
+    if file_contents:
+        github_context += "=== FILE CONTENTS (actual source code) ===\n"
+        for path, content in file_contents.items():
+            github_context += f"\n--- {path} ---\n{content}\n"
+    else:
+        github_context += "File tree:\n" + "\n".join(repo_tree[:100])
 
     # ── Step 4: Claude analysis + code generation ───────────────────────────
-    print("[Agent] Sending to Claude for analysis + code generation ...", flush=True)
+    print("[Agent] Sending to Claude for analysis + code generation ...",
+          flush=True)
 
     prompt = f"""You are an expert software engineer and change manager.
 
-You have been given a new Jira issue. Analyse it, plan the fix, and if the change
-is low risk, generate the exact code changes needed.
+You have been given a Jira issue AND the actual source code of the relevant files.
+Analyse the issue, then generate the EXACT code changes needed.
 
 ## ADEV Issue
 Key: {issue.get('key')}
@@ -152,12 +237,11 @@ Summary: {issue.get('summary')}
 Description: {issue.get('description', '(no description)')}
 Status: {issue.get('status')}
 Priority: {issue.get('priority')}
-Type: {issue.get('issuetype')}
 
 ## Confluence Documentation
 {confluence_context}
 
-## GitHub Repository
+## GitHub Repository + File Contents
 {github_context}
 
 ## Your Task
@@ -175,32 +259,33 @@ Produce a JSON response with these exact fields:
     {{
       "file_path": "relative/path/to/file.ext",
       "description": "what change to make in this file",
-      "search": "exact string to find and replace (must be unique in the file)",
-      "replace": "exact string to replace it with"
+      "search": "exact string from the file content above to find (must be unique)",
+      "replace": "exact replacement string"
     }}
   ]
 }}
 
+CRITICAL rules for code_changes:
+- You HAVE the actual file contents above - use them
+- search must be copied EXACTLY from the file content (including whitespace)
+- search must be unique within the file
+- replace is the complete new version of that string
+- File paths must match exactly as shown above
+- If the file content was not provided, set execution_safe=false
+
 Rules for execution_safe=true (ALL must be true):
 - risk_level is LOW
 - No database schema changes
-- No destructive operations  
+- No destructive operations
 - No external service configuration changes
 - Change is fully reversible via a revert commit
-- code_changes list is non-empty with specific search/replace pairs
-
-For code_changes:
-- Only include if execution_safe=true
-- search must be a unique string that exists in the file
-- replace is the exact new content
-- File paths must match exactly what is in the GitHub file tree above
-- If you cannot identify the exact file or string to change, set execution_safe=false
+- code_changes is non-empty with valid search/replace pairs from actual file content
 
 Respond with ONLY the JSON object, no markdown fences, no explanation."""
 
     response = claude.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=3000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -247,18 +332,22 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
                         replace_str = change["replace"]
                         description = change.get("description", "")
 
-                        print(f"[Agent] Reading {file_path} ...", flush=True)
-                        file_raw = await call_tool(gh, "github_get_file", {
-                            "owner": APP_GITHUB_OWNER,
-                            "repo":  APP_GITHUB_REPO,
-                            "path":  file_path,
-                        })
-                        file_data    = json.loads(file_raw)
-                        old_content  = file_data["content"]
+                        # Use cached content if we already read it
+                        if file_path in file_contents:
+                            old_content = file_contents[file_path]
+                        else:
+                            print(f"[Agent] Reading {file_path} ...", flush=True)
+                            file_raw = await call_tool(gh, "github_get_file", {
+                                "owner": APP_GITHUB_OWNER,
+                                "repo":  APP_GITHUB_REPO,
+                                "path":  file_path,
+                            })
+                            file_data   = json.loads(file_raw)
+                            old_content = file_data["content"]
 
                         if search_str not in old_content:
-                            msg = (f"SKIPPED {file_path}: search string not found. "
-                                   f"Marking for manual review.")
+                            msg = (f"SKIPPED {file_path}: search string not found "
+                                   f"- marking for manual review")
                             print(f"[Agent] WARNING: {msg}", flush=True)
                             execution_log.append(msg)
                             auto_exec = False
@@ -266,10 +355,10 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
 
                         new_content = old_content.replace(search_str, replace_str, 1)
                         commit_msg  = (
-                            f"fix({issue_key}): {description or analysis.get('acr_summary', '')}\n\n"
+                            f"fix({issue_key}): "
+                            f"{description or analysis.get('acr_summary', '')}\n\n"
                             f"Auto-executed by ArdouraAI agent\n"
-                            f"ADEV: {issue_key}\n"
-                            f"ACR:  (created in next step)"
+                            f"ADEV: {issue_key}"
                         )
 
                         print(f"[Agent] Committing {file_path} ...", flush=True)
@@ -293,15 +382,13 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
             auto_exec = False
     else:
         if analysis.get("execution_safe") and not code_changes:
-            print("[Agent] Marked safe but no code_changes provided - leaving for manual review",
-                  flush=True)
             analysis["execution_safe"] = False
             analysis["execution_rationale"] += " (No code changes generated)"
 
     # ── Step 6: Create ACR + link + comments ────────────────────────────────
     print(f"[Agent] Creating ACR in {JIRA_ACTION_PROJECT} ...", flush=True)
 
-    steps_text = "\n".join(
+    steps_text    = "\n".join(
         f"{i+1}. {s}" for i, s in enumerate(analysis.get("steps", []))
     )
     exec_log_text = "\n".join(execution_log) if execution_log else "(no changes executed)"
@@ -329,7 +416,6 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
         async with ClientSession(r, w) as jira:
             await jira.initialize()
 
-            # Create ACR
             acr_raw = await call_tool(jira, "jira_create_ticket", {
                 "project_key": JIRA_ACTION_PROJECT,
                 "summary":     analysis.get("acr_summary",
@@ -345,7 +431,6 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
             acr_key = acr["key"]
             print(f"[Agent] ACR created: {acr_key}", flush=True)
 
-            # Link ACR -> ADEV
             await call_tool(jira, "jira_link_issues", {
                 "link_type":   "Fixes",
                 "inward_key":  acr_key,
@@ -353,12 +438,14 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
             })
             print(f"[Agent] Linked {acr_key} -> {issue_key}", flush=True)
 
-            # Comment on ADEV
             adev_comment = (
-                f"ArdouraAI has analysed this issue and created ACR *{acr_key}*.\n\n"
+                f"ArdouraAI analysed this issue and created ACR *{acr_key}*.\n\n"
+                f"*Target Repo:* {APP_GITHUB_OWNER}/{APP_GITHUB_REPO}\n"
+                f"*Files Read:* {', '.join(file_contents.keys()) or 'none'}\n"
                 f"*Risk Level:* {analysis.get('risk_level')}\n"
                 f"*Estimated Effort:* {analysis.get('estimated_effort')}\n"
-                f"*Auto-Executed:* {'Yes - code committed to GitHub' if auto_exec else 'No - assigned for manual review'}\n"
+                f"*Auto-Executed:* "
+                f"{'Yes - code committed to GitHub' if auto_exec else 'No - manual review needed'}\n"
                 f"*Rationale:* {analysis.get('execution_rationale')}\n\n"
                 + (f"*Commits:*\n{exec_log_text}\n\n" if auto_exec else "")
                 + f"View ACR: {ATLASSIAN_BASE}/browse/{acr_key}"
@@ -369,25 +456,20 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
             })
             print(f"[Agent] Comment added to {issue_key}", flush=True)
 
-            # Assign ACR to operator
             if OPERATOR_ACCOUNT_ID:
                 await call_tool(jira, "jira_assign_issue", {
                     "issue_key":  acr_key,
                     "account_id": OPERATOR_ACCOUNT_ID,
                 })
-                print(f"[Agent] ACR assigned to operator", flush=True)
 
             if auto_exec:
-                # Transition to In Progress then Done
-                print(f"[Agent] Transitioning {acr_key} to In Progress ...", flush=True)
+                print(f"[Agent] Transitioning {acr_key} In Progress -> Done ...",
+                      flush=True)
                 await call_tool(jira, "jira_transition_issue", {
-                    "issue_key":       acr_key,
-                    "transition_name": "In Progress",
+                    "issue_key": acr_key, "transition_name": "In Progress"
                 })
-                print(f"[Agent] Transitioning {acr_key} to Done ...", flush=True)
                 await call_tool(jira, "jira_transition_issue", {
-                    "issue_key":       acr_key,
-                    "transition_name": "Done",
+                    "issue_key": acr_key, "transition_name": "Done"
                 })
                 await call_tool(jira, "jira_add_comment", {
                     "issue_key": acr_key,
@@ -402,12 +484,12 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
                 await call_tool(jira, "jira_add_comment", {
                     "issue_key": acr_key,
                     "comment":   (
-                        f"ArdouraAI flagged this for manual review.\n\n"
+                        f"ArdouraAI flagged for manual review.\n\n"
                         f"*Reason:* {analysis.get('execution_rationale')}\n"
-                        f"*Risk Level:* {analysis.get('risk_level')}\n\n"
+                        f"*Risk:* {analysis.get('risk_level')}\n\n"
                         + (f"*Execution errors:*\n{exec_log_text}\n\n"
                            if execution_log else "")
-                        + f"Please review and transition to In Progress when ready.\n\n"
+                        + f"Review steps and transition to In Progress when ready.\n\n"
                         f"Original issue: {ATLASSIAN_BASE}/browse/{issue_key}"
                     ),
                 })
