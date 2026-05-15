@@ -9,15 +9,13 @@ x-common-env: &common-env
   env_file:
     - /opt/ardoura/.env
 
-x-pip-cache: &pip-cache
-  - pip-packages:/usr/local/lib/python3.11/site-packages
-  - pip-bin:/usr/local/bin
+x-python-env: &python-env
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
 
 services:
 
   # -- Dependency installer (runs once then exits) ----------------------------
-  # Installs all Python deps into a shared volume so other containers
-  # can start immediately without running pip themselves.
   pip-installer:
     image: python:3.11-slim
     container_name: pip-installer
@@ -26,6 +24,8 @@ services:
       - /opt/ardoura:/app
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
+    environment:
+      PYTHONUNBUFFERED: "1"
     command: >-
       bash -c "
         echo '[pip-installer] Installing dependencies...' &&
@@ -113,6 +113,7 @@ services:
       - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
+      <<: *python-env
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     command: python kafka_jira_producer.py
     ports:
@@ -141,6 +142,7 @@ services:
       - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
+      <<: *python-env
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     command: python kafka_jira_consumer.py
     depends_on:
@@ -163,6 +165,7 @@ services:
       - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
+      <<: *python-env
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     command: python kafka_observability_consumer.py
     depends_on:
