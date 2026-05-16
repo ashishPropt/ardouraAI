@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ArdouraAI &mdash; AI-Powered DevOps Automation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:        #0a0a0f;
+  --surface:   #12121a;
+  --border:    #1e1e2e;
+  --accent:    #00e5b0;
+  --accent2:   #7b5ea7;
+  --text:      #e8e8f0;
+  --muted:     #6b6b80;
+  --highlight: #1a1a2e;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Syne', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow-x: hidden;
+}
+
+/* ── Nav ───────────────────────────────────────────────── */
+nav {
+  position: fixed; top: 0; width: 100%; z-index: 100;
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1.2rem 4rem;
+  background: rgba(10,10,15,0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.logo {
+  font-size: 1.4rem; font-weight: 800; letter-spacing: -0.03em;
+  color: var(--accent);
+}
+.logo span { color: var(--text); }
+.nav-links a {
+  color: var(--muted); text-decoration: none;
+  margin-left: 2rem; font-size: 0.9rem; font-weight: 600;
+  transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--accent); }
+.nav-cta {
+  background: var(--accent); color: #000;
+  padding: 0.5rem 1.2rem; border-radius: 6px;
+  font-weight: 700; font-size: 0.85rem;
+  text-decoration: none; margin-left: 2rem;
+  transition: opacity 0.2s;
+}
+.nav-cta:hover { opacity: 0.85; color: #000; }
+
+/* ── Hero ──────────────────────────────────────────────── */
+.hero {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 8rem 2rem 4rem;
+  position: relative; overflow: hidden;
+}
+.hero-bg {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%, rgba(0,229,176,0.12) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 80%, rgba(123,94,167,0.10) 0%, transparent 50%);
+}
+.hero-grid {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(30,30,46,0.4) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30,30,46,0.4) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 30%, transparent 80%);
+}
+.hero-content { position: relative; max-width: 800px; }
+.hero-badge {
+  display: inline-block;
+  background: rgba(0,229,176,0.1); border: 1px solid rgba(0,229,176,0.3);
+  color: var(--accent); font-family: 'DM Mono', monospace;
+  font-size: 0.75rem; padding: 0.3rem 0.8rem; border-radius: 100px;
+  margin-bottom: 2rem; letter-spacing: 0.05em;
+  animation: fadeUp 0.6s ease both;
+}
+.hero h1 {
+  font-size: clamp(2.8rem, 6vw, 5rem);
+  font-weight: 800; line-height: 1.05;
+  letter-spacing: -0.04em;
+  animation: fadeUp 0.6s 0.1s ease both;
+}
+.hero h1 em {
+  font-style: normal;
+  background: linear-gradient(135deg, var(--accent), #00b8d4);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero-sub {
+  margin-top: 1.5rem;
+  font-size: 1.15rem; color: var(--muted); line-height: 1.6;
+  max-width: 580px; margin-left: auto; margin-right: auto;
+  animation: fadeUp 0.6s 0.2s ease both;
+}
+.hero-actions {
+  margin-top: 2.5rem; display: flex; gap: 1rem;
+  justify-content: center; flex-wrap: wrap;
+  animation: fadeUp 0.6s 0.3s ease both;
+}
+.btn-primary {
+  background: var(--accent); color: #000;
+  padding: 0.85rem 2rem; border-radius: 8px;
+  font-weight: 700; font-size: 0.95rem;
+  text-decoration: none; border: none; cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  box-shadow: 0 0 30px rgba(0,229,176,0.25);
+}
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 40px rgba(0,229,176,0.4);
+}
+.btn-ghost {
+  background: transparent; color: var(--text);
+  padding: 0.85rem 2rem; border-radius: 8px;
+  font-weight: 600; font-size: 0.95rem;
+  text-decoration: none; border: 1px solid var(--border);
+  transition: border-color 0.2s;
+}
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Flow diagram ────────────────────────────────────────── */
+.flow {
+  display: flex; align-items: center; justify-content: center;
+  gap: 0; flex-wrap: wrap; margin-top: 4rem;
+  animation: fadeUp 0.6s 0.4s ease both;
+}
+.flow-step {
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center; width: 130px;
+}
+.flow-icon {
+  width: 52px; height: 52px; border-radius: 12px;
+  background: var(--surface); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.4rem; margin-bottom: 0.5rem;
+  position: relative;
+}
+.flow-icon::after {
+  content: '';
+  position: absolute; inset: -1px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(0,229,176,0.3), transparent);
+  opacity: 0; transition: opacity 0.3s;
+}
+.flow-step:hover .flow-icon::after { opacity: 1; }
+.flow-label { font-size: 0.72rem; color: var(--muted); font-weight: 600; }
+.flow-arrow {
+  color: var(--accent); font-size: 1.2rem;
+  margin: 0 0.2rem; padding-bottom: 1.5rem;
+  opacity: 0.5;
+}
+
+/* ── Sections ────────────────────────────────────────────── */
+section { padding: 6rem 4rem; max-width: 1200px; margin: 0 auto; }
+.section-tag {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.72rem; color: var(--accent);
+  letter-spacing: 0.12em; margin-bottom: 1rem;
+  display: block;
+}
+.section-title {
+  font-size: clamp(1.8rem, 3.5vw, 2.8rem);
+  font-weight: 800; letter-spacing: -0.03em;
+  line-height: 1.1; margin-bottom: 1rem;
+}
+.section-sub {
+  color: var(--muted); font-size: 1rem; max-width: 480px; line-height: 1.6;
+}
+
+/* ── Integrations grid ──────────────────────────────────────── */
+.tools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem; margin-top: 3rem;
+}
+.tool-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 1.5rem;
+  transition: border-color 0.2s, transform 0.2s;
+  cursor: default;
+}
+.tool-card:hover {
+  border-color: rgba(0,229,176,0.4);
+  transform: translateY(-3px);
+}
+.tool-icon { font-size: 2rem; margin-bottom: 0.75rem; display: block; }
+.tool-name { font-weight: 700; font-size: 1rem; margin-bottom: 0.3rem; }
+.tool-desc { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+
+/* ── Pricing ───────────────────────────────────────────────── */
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.5rem; margin-top: 3rem;
+}
+.plan-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 16px; padding: 2rem;
+  position: relative; transition: transform 0.2s;
+}
+.plan-card.highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 40px rgba(0,229,176,0.1);
+}
+.plan-card:hover { transform: translateY(-4px); }
+.plan-badge {
+  position: absolute; top: -12px; left: 50%; transform: translateX(-50%);
+  background: var(--accent); color: #000;
+  font-size: 0.72rem; font-weight: 700;
+  padding: 0.2rem 0.8rem; border-radius: 100px;
+  white-space: nowrap;
+}
+.plan-name { font-size: 1rem; font-weight: 700; color: var(--muted); }
+.plan-price {
+  font-size: 2.8rem; font-weight: 800; letter-spacing: -0.04em;
+  margin: 0.5rem 0 0;
+}
+.plan-period { font-size: 0.85rem; color: var(--muted); margin-bottom: 1.5rem; }
+.plan-features { list-style: none; margin-bottom: 2rem; }
+.plan-features li {
+  font-size: 0.88rem; color: var(--muted);
+  padding: 0.4rem 0; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.plan-features li::before { content: '✓'; color: var(--accent); font-weight: 700; }
+.plan-cta {
+  display: block; text-align: center;
+  background: var(--accent); color: #000;
+  padding: 0.75rem; border-radius: 8px;
+  font-weight: 700; font-size: 0.9rem;
+  text-decoration: none; cursor: pointer;
+  transition: opacity 0.2s;
+}
+.plan-card:not(.highlight) .plan-cta {
+  background: transparent; color: var(--text);
+  border: 1px solid var(--border);
+}
+.plan-cta:hover { opacity: 0.8; }
+
+/* ── Signup form ──────────────────────────────────────────── */
+#signup {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  max-width: 100%;
+  padding: 6rem 4rem;
+}
+.signup-inner { max-width: 680px; margin: 0 auto; }
+.form-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 1rem; margin-top: 2rem;
+}
+.form-full { grid-column: 1 / -1; }
+label {
+  display: block; font-size: 0.8rem; font-weight: 600;
+  color: var(--muted); margin-bottom: 0.4rem;
+  letter-spacing: 0.05em;
+}
+input, select {
+  width: 100%;
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); padding: 0.7rem 0.9rem;
+  border-radius: 8px; font-family: inherit; font-size: 0.9rem;
+  transition: border-color 0.2s;
+}
+input:focus, select:focus {
+  outline: none; border-color: var(--accent);
+}
+.tools-checklist {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.6rem; margin-top: 0.5rem;
+}
+.tool-check {
+  display: flex; align-items: center; gap: 0.5rem;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.6rem 0.8rem;
+  cursor: pointer; transition: border-color 0.2s;
+  font-size: 0.85rem;
+}
+.tool-check input[type=checkbox] {
+  width: auto; accent-color: var(--accent);
+}
+.tool-check:hover { border-color: rgba(0,229,176,0.4); }
+.tool-check:has(input:checked) {
+  border-color: var(--accent);
+  background: rgba(0,229,176,0.05);
+}
+.submit-btn {
+  margin-top: 1.5rem;
+  width: 100%; padding: 1rem;
+  background: var(--accent); color: #000;
+  border: none; border-radius: 8px;
+  font-family: inherit; font-size: 1rem; font-weight: 700;
+  cursor: pointer; transition: opacity 0.2s, transform 0.2s;
+}
+.submit-btn:hover { opacity: 0.85; transform: translateY(-1px); }
+
+/* ── Footer ───────────────────────────────────────────────── */
+footer {
+  text-align: center; padding: 3rem;
+  color: var(--muted); font-size: 0.82rem;
+  border-top: 1px solid var(--border);
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 768px) {
+  nav { padding: 1rem 1.5rem; }
+  .nav-links { display: none; }
+  section { padding: 4rem 1.5rem; }
+  #signup { padding: 4rem 1.5rem; }
+  .form-grid { grid-template-columns: 1fr; }
+  .hero { padding: 7rem 1.5rem 3rem; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">Ardoura<span>AI</span></div>
+  <div class="nav-links">
+    <a href="#integrations">Integrations</a>
+    <a href="#how-it-works">How it works</a>
+    <a href="#pricing">Pricing</a>
+  </div>
+  <a href="#signup" class="nav-cta">Get Started</a>
+</nav>
+
+<section class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-grid"></div>
+  <div class="hero-content">
+    <div class="hero-badge">⚡ AI-POWERED DEVOPS AUTOMATION</div>
+    <h1>Your team ships.<br><em>ArdouraAI handles</em><br>the rest.</h1>
+    <p class="hero-sub">
+      Connect your Jira, GitHub, Confluence, and observability tools.
+      ArdouraAI automatically triages issues, generates code fixes,
+      and closes tickets &mdash; while you stay focused on what matters.
+    </p>
+    <div class="hero-actions">
+      <a href="#signup" class="btn-primary">Start for free</a>
+      <a href="#how-it-works" class="btn-ghost">See how it works</a>
+    </div>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="flow-icon">📋</div>
+        <div class="flow-label">Jira Issue</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon">🧠</div>
+        <div class="flow-label">AI Analysis</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon">🐙</div>
+        <div class="flow-label">Read Code</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon">⚙️</div>
+        <div class="flow-label">Auto Fix</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon">✅</div>
+        <div class="flow-label">Done</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="integrations">
+  <span class="section-tag">INTEGRATIONS</span>
+  <h2 class="section-title">Works with the tools<br>your team already uses</h2>
+  <p class="section-sub">
+    Connect in minutes. ArdouraAI reads your context, understands your codebase,
+    and takes action across your entire stack.
+  </p>
+  <div class="tools-grid">
+    {% for tool in tools %}
+    <div class="tool-card">
+      <span class="tool-icon">{{ tool.icon }}</span>
+      <div class="tool-name">{{ tool.name }}</div>
+      <div class="tool-desc">{{ tool.desc }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section id="how-it-works" style="background: var(--highlight); border-radius: 24px; max-width: 1200px; margin: 0 auto;">
+  <span class="section-tag">HOW IT WORKS</span>
+  <h2 class="section-title">From issue to fix<br>in under 60 seconds</h2>
+  <div style="margin-top: 3rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 2rem;">
+    <div>
+      <div style="font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--accent); margin-bottom: 0.5rem;">01</div>
+      <div style="font-weight: 700; font-size: 1rem; margin-bottom: 0.5rem;">Connect your tools</div>
+      <div style="font-size: 0.85rem; color: var(--muted); line-height: 1.6;">Sign up, pick your integrations, and provide your API credentials. Encrypted and stored securely per tenant.</div>
+    </div>
+    <div>
+      <div style="font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--accent); margin-bottom: 0.5rem;">02</div>
+      <div style="font-weight: 700; font-size: 1rem; margin-bottom: 0.5rem;">Register a webhook</div>
+      <div style="font-size: 0.85rem; color: var(--muted); line-height: 1.6;">Point your Jira, Dynatrace, or Datadog webhook to your unique ArdouraAI endpoint. Takes 30 seconds.</div>
+    </div>
+    <div>
+      <div style="font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--accent); margin-bottom: 0.5rem;">03</div>
+      <div style="font-weight: 700; font-size: 1rem; margin-bottom: 0.5rem;">AI reads everything</div>
+      <div style="font-size: 0.85rem; color: var(--muted); line-height: 1.6;">Claude reads your Jira issue, Confluence docs, and actual source code to understand the full context.</div>
+    </div>
+    <div>
+      <div style="font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--accent); margin-bottom: 0.5rem;">04</div>
+      <div style="font-weight: 700; font-size: 1rem; margin-bottom: 0.5rem;">Auto-fix or escalate</div>
+      <div style="font-size: 0.85rem; color: var(--muted); line-height: 1.6;">Low-risk changes are committed to GitHub automatically. Complex changes create a detailed ACR for your team.</div>
+    </div>
+  </div>
+</section>
+
+<section id="pricing" style="max-width: 1200px; margin: 0 auto;">
+  <span class="section-tag">PRICING</span>
+  <h2 class="section-title">Simple, transparent pricing</h2>
+  <p class="section-sub">Start free. Upgrade when you need it. No hidden fees.</p>
+  <div class="pricing-grid">
+    {% for plan in plans %}
+    <div class="plan-card {% if plan.highlight %}highlight{% endif %}">
+      {% if plan.highlight %}
+      <div class="plan-badge">★ MOST POPULAR</div>
+      {% endif %}
+      <div class="plan-name">{{ plan.name }}</div>
+      <div class="plan-price">{{ plan.price }}</div>
+      <div class="plan-period">{{ plan.period }}</div>
+      <ul class="plan-features">
+        {% for f in plan.features %}
+        <li>{{ f }}</li>
+        {% endfor %}
+      </ul>
+      <a href="#signup" class="plan-cta" onclick="document.getElementById('plan-select').value='{{ plan.id }}'">
+        {{ plan.cta }}
+      </a>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<div id="signup">
+  <div class="signup-inner">
+    <span class="section-tag">GET STARTED</span>
+    <h2 class="section-title">Start automating today</h2>
+    <p class="section-sub" style="margin-bottom: 0;">
+      Free to start. Our team will reach out within 24 hours to complete your setup.
+    </p>
+    <form class="form-grid" action="/signup" method="POST">
+      <div>
+        <label>FULL NAME *</label>
+        <input type="text" name="name" placeholder="Jane Smith" required>
+      </div>
+      <div>
+        <label>WORK EMAIL *</label>
+        <input type="email" name="email" placeholder="jane@company.com" required>
+      </div>
+      <div>
+        <label>COMPANY</label>
+        <input type="text" name="company" placeholder="Acme Corp">
+      </div>
+      <div>
+        <label>PLAN</label>
+        <select name="plan" id="plan-select">
+          <option value="free">Free</option>
+          <option value="starter">Starter &mdash; $49/mo</option>
+          <option value="pro">Pro &mdash; $199/mo</option>
+        </select>
+      </div>
+      <div class="form-full">
+        <label>TOOLS YOU USE (select all that apply)</label>
+        <div class="tools-checklist">
+          {% for tool in tools %}
+          <label class="tool-check">
+            <input type="checkbox" name="tools" value="{{ tool.id }}">
+            {{ tool.icon }} {{ tool.name }}
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="form-full">
+        <button type="submit" class="submit-btn">
+          Request Access &rarr;
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<footer>
+  <div style="margin-bottom: 0.5rem;">
+    <strong style="color: var(--accent);">ArdouraAI</strong>
+    &nbsp;&mdash;&nbsp; AI-Powered DevOps Automation
+  </div>
+  &copy; 2026 ArdouraAI. All rights reserved.
+</footer>
+
+</body>
+</html>

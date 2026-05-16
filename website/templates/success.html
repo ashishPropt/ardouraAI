@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>You're in! &mdash; ArdouraAI</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+:root { --bg: #0a0a0f; --accent: #00e5b0; --text: #e8e8f0; --muted: #6b6b80; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Syne', sans-serif;
+  background: var(--bg); color: var(--text);
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 2rem;
+}
+.card {
+  max-width: 480px;
+  animation: pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.icon {
+  font-size: 4rem; margin-bottom: 1.5rem;
+  animation: spin 0.6s ease both 0.2s;
+  display: block;
+}
+.card h1 {
+  font-size: 2.4rem; font-weight: 800;
+  letter-spacing: -0.04em; margin-bottom: 1rem;
+}
+.card h1 span { color: var(--accent); }
+.card p {
+  color: var(--muted); line-height: 1.6;
+  margin-bottom: 2rem;
+}
+.back-btn {
+  display: inline-block;
+  background: var(--accent); color: #000;
+  padding: 0.75rem 1.8rem; border-radius: 8px;
+  font-weight: 700; text-decoration: none;
+  transition: opacity 0.2s;
+}
+.back-btn:hover { opacity: 0.8; }
+@keyframes pop {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes spin {
+  from { transform: rotate(-30deg) scale(0.5); opacity: 0; }
+  to   { transform: rotate(0deg) scale(1); opacity: 1; }
+}
+</style>
+</head>
+<body>
+<div class="card">
+  <span class="icon">⚡</span>
+  <h1>You're <span>in!</span></h1>
+  <p>
+    Thanks for signing up. Our team will reach out within 24 hours
+    to get your ArdouraAI instance configured and your first
+    integration live.
+  </p>
+  <a href="/" class="back-btn">Back to home</a>
+</div>
+</body>
+</html>
