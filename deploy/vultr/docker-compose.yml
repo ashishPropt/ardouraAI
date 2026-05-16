@@ -1,8 +1,5 @@
 # =============================================================================
-# ArdouraAI - Docker Compose  (Vultr deployment)
-#
-# Dependencies are pre-installed into a shared pip-cache volume on first
-# run, so containers start instantly on restart without re-running pip.
+# ArdouraAI - Docker Compose  (Vultr deployment - Multi-Tenant)
 # =============================================================================
 
 x-common-env: &common-env
@@ -29,7 +26,6 @@ services:
     command: >-
       bash -c "
         echo '[pip-installer] Installing dependencies...' &&
-        pip install --quiet flask kafka-python python-dotenv &&
         pip install --quiet -r requirements.txt &&
         echo '[pip-installer] Done!'
       "
@@ -81,27 +77,8 @@ services:
       retries: 10
       start_period: 30s
 
-  # -- Kafka topic initialiser (runs once then exits) -------------------------
-  kafka-init:
-    image: confluentinc/cp-kafka:7.6.1
-    container_name: kafka-init
-    depends_on:
-      kafka:
-        condition: service_healthy
-    restart: on-failure
-    entrypoint: ["/bin/bash", "-c"]
-    command:
-      - |
-        for topic in jira-events dynatrace-alerts datadog-alerts grafana-alerts; do
-          kafka-topics --bootstrap-server kafka:9092 \
-            --create --if-not-exists \
-            --topic $$topic \
-            --partitions 1 \
-            --replication-factor 1
-          echo "Topic $$topic ready"
-        done
-
-  # -- Flask webhook receiver / Kafka producer --------------------------------
+  # -- Multi-tenant Flask webhook receiver ------------------------------------
+  # Routes /webhook/{tenant_id}/jira etc. to correct Kafka topic
   flask-producer:
     image: python:3.11-slim
     container_name: flask-producer
@@ -109,13 +86,15 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
+      - /etc/ardoura:/etc/ardoura:ro
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
       <<: *python-env
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    command: python kafka_jira_producer.py
+      FLASK_PORT: "5000"
+    command: python tenant/multitenant_producer.py
     ports:
       - "5000:5000"
     depends_on:
@@ -124,13 +103,15 @@ services:
       pip-installer:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 15s
 
-  # -- Jira AI consumer -------------------------------------------------------
+  # -- Multi-tenant Kafka consumer --------------------------------------------
+  # Dynamically subscribes to all active tenant topics
   jira-consumer:
     image: python:3.11-slim
     container_name: jira-consumer
@@ -138,18 +119,40 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
+      - /etc/ardoura:/etc/ardoura:ro
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
     <<: *common-env
     environment:
       <<: *python-env
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    command: python kafka_jira_consumer.py
+      TENANT_REFRESH_INTERVAL: "60"
+    command: python tenant/multitenant_consumer.py
     depends_on:
       kafka:
         condition: service_healthy
-      kafka-init:
+      pip-installer:
         condition: service_completed_successfully
+
+  # -- Marketing website + signup form ----------------------------------------
+  website:
+    image: python:3.11-slim
+    container_name: website
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /opt/ardoura:/app
+      - /etc/ardoura:/etc/ardoura
+      - pip-packages:/usr/local/lib/python3.11/site-packages
+      - pip-bin:/usr/local/bin
+    <<: *common-env
+    environment:
+      <<: *python-env
+      WEBSITE_PORT: "8080"
+    command: python website/app.py
+    ports:
+      - "8080:8080"
+    depends_on:
       pip-installer:
         condition: service_completed_successfully
 
@@ -161,6 +164,7 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
+      - /etc/ardoura:/etc/ardoura:ro
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
     <<: *common-env
@@ -171,8 +175,6 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      kafka-init:
-        condition: service_completed_successfully
       pip-installer:
         condition: service_completed_successfully
 
