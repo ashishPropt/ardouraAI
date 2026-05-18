@@ -10,12 +10,6 @@ x-python-env: &python-env
   PYTHONUNBUFFERED: "1"
   PYTHONDONTWRITEBYTECODE: "1"
 
-# /etc/ardoura is mounted read-write everywhere so tenant_agent can
-# decrypt secrets and onboarding can write encrypted secrets.enc files.
-# The directory is owned by root:root 700 on the host - safe.
-x-ardoura-secrets: &ardoura-secrets
-  - /etc/ardoura:/etc/ardoura
-
 services:
 
   # -- Dependency installer (runs once then exits) ----------------------------
@@ -91,7 +85,7 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
-      - *ardoura-secrets
+      - /etc/ardoura:/etc/ardoura
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
     <<: *common-env
@@ -123,7 +117,7 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
-      - *ardoura-secrets
+      - /etc/ardoura:/etc/ardoura
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
     <<: *common-env
@@ -146,7 +140,7 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
-      - *ardoura-secrets
+      - /etc/ardoura:/etc/ardoura
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
     <<: *common-env
@@ -168,7 +162,7 @@ services:
     working_dir: /app
     volumes:
       - /opt/ardoura:/app
-      - *ardoura-secrets
+      - /etc/ardoura:/etc/ardoura
       - pip-packages:/usr/local/lib/python3.11/site-packages
       - pip-bin:/usr/local/bin
     <<: *common-env
