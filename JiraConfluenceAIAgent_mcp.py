@@ -7,10 +7,10 @@ AI agent that:
   2. Checks Confluence docs for context
   3. Gets GitHub repo tree -> asks Claude which files are relevant
      -> reads those files' ACTUAL CONTENTS before generating the fix
-  4. Uses Claude to generate exact search/replace code changes
+  4. Uses Claude to generate exact code changes (modify OR create files)
   5. Creates an ACR ticket linked to the ADEV as 'fixes'
   6. If execution_safe=True (LOW blast radius):
-       - Commits the code changes to GitHub
+       - Commits the code changes to GitHub (modify or create files)
        - Transitions ACR to In Progress then Done
      Otherwise:
        - Leaves ACR Open, assigns to operator for manual review
@@ -48,9 +48,7 @@ APP_GITHUB_REPO     = os.environ.get("APP_GITHUB_REPO", "Princetondawgs")
 APP_GITHUB_BRANCH   = os.environ.get("APP_GITHUB_BRANCH", "main")
 OPERATOR_ACCOUNT_ID = os.environ.get("JIRA_ASSIGNEE_ACCOUNT_ID", "")
 
-# Max chars to include per file so we don't blow the context window
 MAX_FILE_CHARS = 8000
-
 BASE_DIR = str(Path(__file__).parent)
 FULL_ENV = {**os.environ}
 
@@ -103,7 +101,6 @@ For logic issues pick PHP/JS files. Respond with ONLY the JSON array."""
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
         files = json.loads(raw)
-        # Only return files that actually exist in the tree
         return [f for f in files if f in repo_tree][:5]
     except Exception:
         return []
@@ -201,15 +198,14 @@ async def run_agent(issue_key: str) -> None:
                             file_data = json.loads(file_raw)
                             content   = file_data.get("content", "")
                             file_contents[file_path] = content[:MAX_FILE_CHARS]
-                            print(f"[Agent] Read {file_path} "
-                                  f"({len(content)} chars)", flush=True)
+                            print(f"[Agent] Read {file_path} ({len(content)} chars)",
+                                  flush=True)
                         except Exception as fe:
                             print(f"[Agent] WARNING: could not read {file_path}: {fe}",
                                   flush=True)
         except Exception as e:
             print(f"[Agent] WARNING: GitHub file read failed: {e}", flush=True)
 
-    # Build github context with actual file contents
     github_context = (
         f"Repository: {APP_GITHUB_OWNER}/{APP_GITHUB_REPO} "
         f"(branch: {APP_GITHUB_BRANCH})\n"
@@ -223,13 +219,12 @@ async def run_agent(issue_key: str) -> None:
         github_context += "File tree:\n" + "\n".join(repo_tree[:100])
 
     # ── Step 4: Claude analysis + code generation ───────────────────────────
-    print("[Agent] Sending to Claude for analysis + code generation ...",
-          flush=True)
+    print("[Agent] Sending to Claude for analysis + code generation ...", flush=True)
 
     prompt = f"""You are an expert software engineer and change manager.
 
 You have been given a Jira issue AND the actual source code of the relevant files.
-Analyse the issue, then generate the EXACT code changes needed.
+Analyse the issue and generate the EXACT code changes needed.
 
 ## ADEV Issue
 Key: {issue.get('key')}
@@ -257,29 +252,45 @@ Produce a JSON response with these exact fields:
   "steps": ["step 1", "step 2", ...],
   "code_changes": [
     {{
-      "file_path": "relative/path/to/file.ext",
-      "description": "what change to make in this file",
-      "search": "exact string from the file content above to find (must be unique)",
+      "operation": "modify",
+      "file_path": "relative/path/to/existing/file.ext",
+      "description": "what change to make",
+      "search": "exact string from file content to find (must be unique in the file)",
       "replace": "exact replacement string"
+    }},
+    {{
+      "operation": "create",
+      "file_path": "relative/path/to/new/file.ext",
+      "description": "what this new file does",
+      "content": "complete content of the new file"
     }}
   ]
 }}
 
-CRITICAL rules for code_changes:
-- You HAVE the actual file contents above - use them
-- search must be copied EXACTLY from the file content (including whitespace)
-- search must be unique within the file
-- replace is the complete new version of that string
-- File paths must match exactly as shown above
-- If the file content was not provided, set execution_safe=false
+There are TWO types of operations in code_changes:
+
+1. "modify" - for EXISTING files (file must appear in the file contents above)
+   - search: copied EXACTLY from the file content shown (including whitespace)
+   - search must be unique within that file
+   - replace: the complete new version of that string
+
+2. "create" - for NEW files that don't exist yet
+   - content: the complete content of the new file
+   - Use this when the issue requires creating a new file
+   - This is SAFE to auto-execute for low-risk new files
 
 Rules for execution_safe=true (ALL must be true):
 - risk_level is LOW
 - No database schema changes
-- No destructive operations
+- No destructive operations on existing data
 - No external service configuration changes
 - Change is fully reversible via a revert commit
-- code_changes is non-empty with valid search/replace pairs from actual file content
+- code_changes is non-empty
+- For "modify": search string exists in the provided file content
+- For "create": new file content is complete and correct
+
+NEVER set execution_safe=false just because a new file needs to be created.
+Creating a new file is always safe as it doesn't modify existing code.
 
 Respond with ONLY the JSON object, no markdown fences, no explanation."""
 
@@ -327,54 +338,82 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
                 async with ClientSession(r, w) as gh:
                     await gh.initialize()
                     for change in code_changes:
+                        operation   = change.get("operation", "modify")
                         file_path   = change["file_path"]
-                        search_str  = change["search"]
-                        replace_str = change["replace"]
                         description = change.get("description", "")
 
-                        # Use cached content if we already read it
-                        if file_path in file_contents:
-                            old_content = file_contents[file_path]
-                        else:
-                            print(f"[Agent] Reading {file_path} ...", flush=True)
-                            file_raw = await call_tool(gh, "github_get_file", {
-                                "owner": APP_GITHUB_OWNER,
-                                "repo":  APP_GITHUB_REPO,
-                                "path":  file_path,
-                            })
-                            file_data   = json.loads(file_raw)
-                            old_content = file_data["content"]
-
-                        if search_str not in old_content:
-                            msg = (f"SKIPPED {file_path}: search string not found "
-                                   f"- marking for manual review")
-                            print(f"[Agent] WARNING: {msg}", flush=True)
-                            execution_log.append(msg)
-                            auto_exec = False
-                            continue
-
-                        new_content = old_content.replace(search_str, replace_str, 1)
-                        commit_msg  = (
-                            f"fix({issue_key}): "
-                            f"{description or analysis.get('acr_summary', '')}\n\n"
+                        commit_msg = (
+                            f"{'feat' if operation == 'create' else 'fix'}"
+                            f"({issue_key}): {description or analysis.get('acr_summary', '')}\n\n"
                             f"Auto-executed by ArdouraAI agent\n"
                             f"ADEV: {issue_key}"
                         )
 
-                        print(f"[Agent] Committing {file_path} ...", flush=True)
-                        commit_raw = await call_tool(gh, "github_commit_file", {
-                            "owner":          APP_GITHUB_OWNER,
-                            "repo":           APP_GITHUB_REPO,
-                            "path":           file_path,
-                            "content":        new_content,
-                            "commit_message": commit_msg,
-                            "branch":         APP_GITHUB_BRANCH,
-                        })
-                        commit_data = json.loads(commit_raw)
-                        sha = commit_data.get("commit_sha", "")[:10]
-                        msg = f"Committed {file_path} -> {sha}"
-                        print(f"[Agent] {msg}", flush=True)
-                        execution_log.append(msg)
+                        if operation == "create":
+                            # Create a brand new file
+                            new_content = change.get("content", "")
+                            if not new_content:
+                                msg = f"SKIPPED {file_path}: no content provided for create"
+                                print(f"[Agent] WARNING: {msg}", flush=True)
+                                execution_log.append(msg)
+                                continue
+
+                            print(f"[Agent] Creating new file {file_path} ...",
+                                  flush=True)
+                            commit_raw = await call_tool(gh, "github_commit_file", {
+                                "owner":          APP_GITHUB_OWNER,
+                                "repo":           APP_GITHUB_REPO,
+                                "path":           file_path,
+                                "content":        new_content,
+                                "commit_message": commit_msg,
+                                "branch":         APP_GITHUB_BRANCH,
+                            })
+                            commit_data = json.loads(commit_raw)
+                            sha = commit_data.get("commit_sha", "")[:10]
+                            msg = f"Created {file_path} -> {sha}"
+                            print(f"[Agent] {msg}", flush=True)
+                            execution_log.append(msg)
+
+                        else:
+                            # Modify an existing file (search/replace)
+                            search_str  = change.get("search", "")
+                            replace_str = change.get("replace", "")
+
+                            if file_path in file_contents:
+                                old_content = file_contents[file_path]
+                            else:
+                                print(f"[Agent] Reading {file_path} ...", flush=True)
+                                file_raw = await call_tool(gh, "github_get_file", {
+                                    "owner": APP_GITHUB_OWNER,
+                                    "repo":  APP_GITHUB_REPO,
+                                    "path":  file_path,
+                                })
+                                file_data   = json.loads(file_raw)
+                                old_content = file_data["content"]
+
+                            if search_str not in old_content:
+                                msg = (f"SKIPPED {file_path}: search string not found "
+                                       f"- marking for manual review")
+                                print(f"[Agent] WARNING: {msg}", flush=True)
+                                execution_log.append(msg)
+                                auto_exec = False
+                                continue
+
+                            new_content = old_content.replace(search_str, replace_str, 1)
+                            print(f"[Agent] Committing {file_path} ...", flush=True)
+                            commit_raw = await call_tool(gh, "github_commit_file", {
+                                "owner":          APP_GITHUB_OWNER,
+                                "repo":           APP_GITHUB_REPO,
+                                "path":           file_path,
+                                "content":        new_content,
+                                "commit_message": commit_msg,
+                                "branch":         APP_GITHUB_BRANCH,
+                            })
+                            commit_data = json.loads(commit_raw)
+                            sha = commit_data.get("commit_sha", "")[:10]
+                            msg = f"Modified {file_path} -> {sha}"
+                            print(f"[Agent] {msg}", flush=True)
+                            execution_log.append(msg)
 
         except Exception as e:
             print(f"[Agent] ERROR during code execution: {e}", flush=True)
@@ -393,7 +432,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation."""
     )
     exec_log_text = "\n".join(execution_log) if execution_log else "(no changes executed)"
     changes_text  = "\n".join(
-        f"- {c.get('file_path')}: {c.get('description')}"
+        f"- [{c.get('operation','modify').upper()}] {c.get('file_path')}: {c.get('description')}"
         for c in code_changes
     ) if code_changes else "(none)"
 
